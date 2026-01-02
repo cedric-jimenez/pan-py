@@ -91,10 +91,10 @@ async def crop_salamander(
         85, ge=1, le=95, description="JPEG quality (1-95, only used for JPEG format)"
     ),
     max_size: int = Query(
-        1280,
+        640,
         ge=320,
-        le=4096,
-        description="Max dimension for detection (image resized if larger). Smaller = faster.",
+        le=2048,
+        description="Max dimension for detection (image resized if larger). Smaller = faster. 640 recommended.",
     ),
 ):
     """

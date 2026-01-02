@@ -61,6 +61,13 @@ class SalamanderDetector:
                 logger.info(f"Model loaded successfully: {self.model_path.name}")
                 if self.model is not None and hasattr(self.model, "names"):
                     logger.info(f"Model classes: {self.model.names}")
+
+                # Log device information
+                device = self.model.device if hasattr(self.model, "device") else "unknown"
+                logger.info(f"Model device: {device}")
+                logger.info(f"CUDA available: {torch.cuda.is_available()}")
+                if torch.cuda.is_available():
+                    logger.info(f"CUDA device: {torch.cuda.get_device_name(0)}")
             finally:
                 # Restore original torch.load
                 torch.load = original_load
@@ -96,8 +103,18 @@ class SalamanderDetector:
             f"Running detection: size={image.size}, mode={image.mode}, conf={conf_threshold}"
         )
 
-        # Run inference with PIL image directly
-        results = self.model(image, conf=conf_threshold, verbose=False)
+        # Run inference with optimized parameters for speed
+        # imgsz=640: standard YOLO size, faster processing
+        # max_det=1: we only need the best detection
+        # half=False: disable FP16 for CPU compatibility (auto-enabled on GPU)
+        # verbose=False: reduce logging overhead
+        results = self.model(
+            image,
+            conf=conf_threshold,
+            imgsz=640,
+            max_det=300,
+            verbose=False,
+        )
 
         # Check if any detections
         if len(results) == 0 or len(results[0].boxes) == 0:
