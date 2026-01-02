@@ -1,5 +1,6 @@
 """YOLO-based salamander detection logic."""
 
+import logging
 import os
 from pathlib import Path
 
@@ -7,6 +8,9 @@ import numpy as np
 import torch
 from PIL import Image
 from ultralytics import YOLO
+
+# Configure logger
+logger = logging.getLogger(__name__)
 
 # PyTorch 2.6+ compatibility note:
 # PyTorch 2.6 changed the default value of weights_only from False to True in torch.load
@@ -22,10 +26,10 @@ class SalamanderDetector:
 
         Args:
             model_path: Path to the YOLO .pt model file.
-                       If None, uses default path from environment or models/best.pt
+                       If None, uses default path from environment or models/crop.pt
         """
         if model_path is None:
-            model_path = os.getenv("YOLO_MODEL_PATH", "models/best.pt")
+            model_path = os.getenv("YOLO_MODEL_PATH", "models/crop.pt")
 
         self.model_path = Path(model_path)
         self.model = None
@@ -39,7 +43,7 @@ class SalamanderDetector:
         """
         try:
             if not self.model_path.exists():
-                print(f"Warning: Model file not found at {self.model_path}")
+                logger.error(f"Model file not found at {self.model_path}")
                 return False
 
             # For PyTorch 2.6+, we need to use weights_only=False for YOLO models
@@ -54,14 +58,16 @@ class SalamanderDetector:
             torch.load = patched_load
             try:
                 self.model = YOLO(str(self.model_path))
-                print(f"Model loaded successfully from {self.model_path}")
+                logger.info(f"Model loaded successfully: {self.model_path.name}")
+                if self.model is not None and hasattr(self.model, "names"):
+                    logger.info(f"Model classes: {self.model.names}")
             finally:
                 # Restore original torch.load
                 torch.load = original_load
 
             return True
         except Exception as e:
-            print(f"Error loading model: {e}")
+            logger.error(f"Error loading model: {e}")
             return False
 
     def is_model_loaded(self) -> bool:
@@ -86,14 +92,16 @@ class SalamanderDetector:
         if self.model is None:
             raise RuntimeError("Model not loaded. Please ensure the model file exists.")
 
-        # Convert PIL Image to numpy array for YOLO
-        img_array = np.array(image)
+        logger.info(
+            f"Running detection: size={image.size}, mode={image.mode}, conf={conf_threshold}"
+        )
 
-        # Run inference
-        results = self.model(img_array, conf=conf_threshold, verbose=False)
+        # Run inference with PIL image directly
+        results = self.model(image, conf=conf_threshold, verbose=False)
 
         # Check if any detections
         if len(results) == 0 or len(results[0].boxes) == 0:
+            logger.info("No salamanders detected")
             return False, None
 
         # Get the detection with highest confidence
@@ -106,6 +114,12 @@ class SalamanderDetector:
         confidence = float(confidences[best_idx])
 
         x1, y1, x2, y2 = map(int, bbox)
+        width, height = x2 - x1, y2 - y1
+
+        logger.info(
+            f"Salamander detected: bbox=({x1},{y1},{x2},{y2}), "
+            f"size={width}x{height}px, confidence={confidence:.2%}"
+        )
 
         # Crop the image
         cropped = image.crop((x1, y1, x2, y2))

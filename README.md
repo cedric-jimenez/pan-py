@@ -48,7 +48,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 Placez votre fichier de modèle YOLO (`.pt`) dans le dossier `models/` :
 
 ```bash
-cp /chemin/vers/votre/modele.pt models/best.pt
+cp /chemin/vers/votre/modele.pt models/crop.pt
 ```
 
 ### 5. Lancer l'API
@@ -161,7 +161,7 @@ async function detectSalamander(file: File) {
 
 ### 1. Préparer votre modèle
 
-Assurez-vous que votre fichier modèle YOLO est bien dans `models/best.pt` et est commit dans le repo (ou ajoutez-le via une autre méthode de storage pour les gros fichiers).
+Assurez-vous que votre fichier modèle YOLO est bien dans `models/crop.pt` et est commit dans le repo (ou ajoutez-le via une autre méthode de storage pour les gros fichiers).
 
 ### 2. Déployer sur Railway
 
@@ -175,7 +175,7 @@ Assurez-vous que votre fichier modèle YOLO est bien dans `models/best.pt` et es
 
 Dans Railway, vous pouvez configurer :
 
-- `YOLO_MODEL_PATH` : Chemin vers le fichier modèle (défaut : `models/best.pt`)
+- `YOLO_MODEL_PATH` : Chemin vers le fichier modèle (défaut : `models/crop.pt`)
 - `ALLOWED_ORIGINS` : Origins autorisées pour CORS (défaut : `*`)
 
 ### 4. Obtenir l'URL de votre API
@@ -224,13 +224,8 @@ pan-py/
 │   ├── detection.py             # YOLO detection logic
 │   └── utils.py                 # Utility functions
 ├── models/
-│   └── best.pt                  # YOLO model (à ajouter)
-├── tests/                       # Tests unitaires
-│   ├── __init__.py
-│   └── test_main.py
-├── .github/
-│   └── workflows/
-│       └── ci.yml               # GitHub Actions CI/CD
+│   └── crop.pt                  # YOLO model (à ajouter)
+├── tests/                       # Tests unitaires (à venir)
 ├── requirements.txt             # Python dependencies
 ├── requirements-dev.txt         # Dev dependencies (linting, tests)
 ├── pyproject.toml               # Project config (Ruff, Black, mypy)
@@ -393,7 +388,7 @@ npx @openapitools/openapi-generator-cli generate \
 
 ### Le modèle ne se charge pas
 
-- Vérifiez que le fichier `models/best.pt` existe
+- Vérifiez que le fichier `models/crop.pt` existe
 - Vérifiez les logs : le chemin du modèle doit être affiché au démarrage
 - Testez l'endpoint `/model-info` pour voir l'état du modèle
 
