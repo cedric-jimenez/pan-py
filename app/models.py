@@ -31,5 +31,5 @@ class HealthResponse(BaseModel):
     """Health check response."""
 
     status: str = Field(..., description="Service status")
-    model_loaded: bool = Field(..., description="Whether YOLO model is loaded")
+    yolo_loaded: bool = Field(..., description="Whether YOLO model is loaded")
     version: str = Field(..., description="API version")
