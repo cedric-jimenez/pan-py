@@ -1,4 +1,4 @@
-.PHONY: help install install-dev format lint type-check test clean run docker-build docker-run
+.PHONY: help install install-dev format lint type-check test clean run docker-build docker-run generate-openapi
 
 # Variables
 PYTHON := python3
@@ -63,6 +63,9 @@ pre-commit-install: ## Install pre-commit hooks
 
 pre-commit-run: ## Run pre-commit on all files
 	pre-commit run --all-files
+
+generate-openapi: ## Generate OpenAPI specification from FastAPI app
+	$(PYTHON) scripts/generate_openapi.py
 
 clean: ## Clean up cache and build files
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
