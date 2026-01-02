@@ -1,6 +1,7 @@
 """FastAPI application for salamander detection and cropping."""
 
 import io
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -14,6 +15,14 @@ from app.detection import SalamanderDetector
 from app.models import BoundingBox, DetectionResponse, HealthResponse
 from app.utils import pil_to_base64
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
 # Global detector instance
 detector: SalamanderDetector | None = None
 
@@ -23,11 +32,11 @@ async def lifespan(_app: FastAPI):
     """Initialize and cleanup resources."""
     global detector
     # Startup: Load the YOLO model
-    print("Loading YOLO model...")
+    logger.info("Loading YOLO model...")
     detector = SalamanderDetector()
     yield
     # Shutdown: cleanup if needed
-    print("Shutting down...")
+    logger.info("Shutting down...")
 
 
 # Initialize FastAPI app
@@ -104,6 +113,8 @@ async def crop_salamander(
     try:
         # Read and open image
         contents = await file.read()
+        logger.info(f"Processing image: {file.filename} ({len(contents)} bytes)")
+
         image = Image.open(io.BytesIO(contents))
 
         # Convert to RGB if necessary (handles RGBA, grayscale, etc.)
@@ -150,6 +161,7 @@ async def crop_salamander(
         )
 
     except Exception as e:
+        logger.error(f"Error processing image: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}") from e
 
 
