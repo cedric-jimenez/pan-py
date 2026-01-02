@@ -16,10 +16,10 @@ class SalamanderDetector:
 
         Args:
             model_path: Path to the YOLO .pt model file.
-                       If None, uses default path from environment or models/best.pt
+                       If None, uses default path from environment or models/crop.pt
         """
         if model_path is None:
-            model_path = os.getenv("YOLO_MODEL_PATH", "models/best.pt")
+            model_path = os.getenv("YOLO_MODEL_PATH", "models/crop.pt")
 
         self.model_path = Path(model_path)
         self.model = None
