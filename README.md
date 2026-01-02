@@ -36,7 +36,11 @@ source venv/bin/activate  # Sur Windows: venv\Scripts\activate
 ### 3. Installer les dépendances
 
 ```bash
+# Dépendances de production
 pip install -r requirements.txt
+
+# OU pour le développement (inclut linting, tests, etc.)
+pip install -r requirements.txt -r requirements-dev.txt
 ```
 
 ### 4. Ajouter votre modèle YOLO
@@ -214,20 +218,25 @@ NEXT_PUBLIC_SALAMANDER_API_URL=https://your-api.railway.app
 ```
 pan-py/
 ├── app/
-│   ├── __init__.py          # Package initialization
-│   ├── main.py              # FastAPI application
-│   ├── models.py            # Pydantic models
-│   ├── detection.py         # YOLO detection logic
-│   └── utils.py             # Utility functions
+│   ├── __init__.py              # Package initialization
+│   ├── main.py                  # FastAPI application
+│   ├── models.py                # Pydantic models
+│   ├── detection.py             # YOLO detection logic
+│   └── utils.py                 # Utility functions
 ├── models/
-│   └── best.pt              # YOLO model (à ajouter)
-├── tests/                   # Tests unitaires (à venir)
-├── requirements.txt         # Python dependencies
-├── Dockerfile               # Docker configuration
-├── railway.toml             # Railway configuration
-├── .dockerignore           # Docker ignore rules
-├── .gitignore              # Git ignore rules
-└── README.md               # Ce fichier
+│   └── best.pt                  # YOLO model (à ajouter)
+├── tests/                       # Tests unitaires (à venir)
+├── requirements.txt             # Python dependencies
+├── requirements-dev.txt         # Dev dependencies (linting, tests)
+├── pyproject.toml               # Project config (Ruff, Black, mypy)
+├── Makefile                     # Dev commands (lint, format, test)
+├── .pre-commit-config.yaml      # Pre-commit hooks configuration
+├── Dockerfile                   # Docker configuration
+├── railway.toml                 # Railway configuration
+├── .dockerignore               # Docker ignore rules
+├── .gitignore                  # Git ignore rules
+├── .env.example                # Environment variables example
+└── README.md                   # Ce fichier
 ```
 
 ## 🧪 Tests
@@ -246,6 +255,98 @@ curl -X POST "http://localhost:8000/crop-salamander" \
 # Voir la documentation interactive
 # Ouvrir http://localhost:8000/docs dans votre navigateur
 ```
+
+## 🛠️ Développement
+
+### Installation pour développement
+
+```bash
+# Installer toutes les dépendances de dev
+pip install -r requirements.txt -r requirements-dev.txt
+
+# OU utiliser le Makefile
+make install-dev
+```
+
+### Linting et formatage
+
+Le projet utilise plusieurs outils pour maintenir la qualité du code :
+
+- **Ruff** : Linter Python ultra-rapide (remplace flake8, isort, etc.)
+- **Black** : Formateur de code automatique
+- **mypy** : Vérificateur de types statique
+- **pre-commit** : Hooks Git automatiques
+
+#### Commandes disponibles (via Makefile)
+
+```bash
+# Voir toutes les commandes disponibles
+make help
+
+# Formater le code automatiquement
+make format
+
+# Vérifier le code (linting)
+make lint
+
+# Vérifier les types
+make type-check
+
+# Tout vérifier (lint + types)
+make check
+
+# Lancer les tests
+make test
+
+# Lancer le serveur de dev
+make run
+```
+
+#### Utilisation manuelle des outils
+
+```bash
+# Formater avec Black
+black app/
+
+# Linter avec Ruff
+ruff check app/
+
+# Auto-fix des problèmes Ruff
+ruff check --fix app/
+
+# Vérification de types avec mypy
+mypy app/
+```
+
+### Pre-commit hooks
+
+Pour activer les vérifications automatiques avant chaque commit :
+
+```bash
+# Installer les hooks
+make pre-commit-install
+
+# OU manuellement
+pre-commit install
+
+# Tester sur tous les fichiers
+make pre-commit-run
+```
+
+Les hooks vérifieront automatiquement :
+- Formatage du code (Black)
+- Linting (Ruff)
+- Types (mypy)
+- Trailing whitespace
+- Fin de fichier
+- Syntaxe YAML/JSON/TOML
+
+### Configuration
+
+Tous les outils sont configurés dans `pyproject.toml` :
+- Ruff : ligne max 100 caractères, règles E/W/F/I/B/C4/UP/ARG/SIM
+- Black : ligne max 100 caractères, Python 3.11+
+- mypy : vérifications strictes avec imports flexibles
 
 ## 📊 Documentation API interactive
 
