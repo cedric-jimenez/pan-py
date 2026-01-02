@@ -25,7 +25,9 @@ def pil_to_base64(image: Image.Image, format: str = "JPEG", quality: int = 85) -
             background = Image.new("RGB", image.size, (255, 255, 255))
             if image.mode == "P":
                 image = image.convert("RGBA")
-            background.paste(image, mask=image.split()[-1] if image.mode in ("RGBA", "LA") else None)
+            background.paste(
+                image, mask=image.split()[-1] if image.mode in ("RGBA", "LA") else None
+            )
             image = background
         image.save(buffered, format=format, quality=quality, optimize=False)
     else:
