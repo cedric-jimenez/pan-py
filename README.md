@@ -74,7 +74,7 @@ Response :
 ```json
 {
   "status": "healthy",
-  "model_loaded": true,
+  "yolo_loaded": true,
   "version": "0.1.0"
 }
 ```

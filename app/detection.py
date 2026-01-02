@@ -4,8 +4,18 @@ import os
 from pathlib import Path
 
 import numpy as np
+import torch
 from PIL import Image
 from ultralytics import YOLO
+
+# Add safe globals for PyTorch 2.6+ to allow YOLO model loading
+try:
+    from ultralytics.nn.tasks import DetectionModel
+
+    torch.serialization.add_safe_globals([DetectionModel])
+except (ImportError, AttributeError):
+    # Fallback for older versions or if import fails
+    pass
 
 
 class SalamanderDetector:

@@ -53,7 +53,7 @@ async def root():
     """Root endpoint with API information."""
     return HealthResponse(
         status="healthy",
-        model_loaded=detector is not None and detector.is_model_loaded(),
+        yolo_loaded=detector is not None and detector.is_model_loaded(),
         version=__version__,
     )
 
@@ -63,7 +63,7 @@ async def health_check():
     """Health check endpoint."""
     return HealthResponse(
         status="healthy",
-        model_loaded=detector is not None and detector.is_model_loaded(),
+        yolo_loaded=detector is not None and detector.is_model_loaded(),
         version=__version__,
     )
 
