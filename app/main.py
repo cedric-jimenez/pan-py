@@ -90,6 +90,12 @@ async def crop_salamander(
     image_quality: int = Query(
         85, ge=1, le=95, description="JPEG quality (1-95, only used for JPEG format)"
     ),
+    max_size: int = Query(
+        1280,
+        ge=320,
+        le=4096,
+        description="Max dimension for detection (image resized if larger). Smaller = faster.",
+    ),
 ):
     """
     Detect and crop a salamander from an uploaded image.
@@ -100,6 +106,8 @@ async def crop_salamander(
         return_base64: Whether to return the cropped image as base64 encoded string
         image_format: Output format (JPEG or PNG). JPEG is 10-20x faster than PNG.
         image_quality: JPEG quality (1-95). Lower = faster but lower quality.
+        max_size: Max dimension for detection. Images larger than this will be resized
+                  for faster detection. The crop is done on the original full-size image.
 
     Returns:
         DetectionResponse with detection results and optionally the cropped image
@@ -119,22 +127,52 @@ async def crop_salamander(
         )
 
     try:
+        import time
+
+        start_time = time.time()
+
         # Read and open image
         contents = await file.read()
-        logger.info(f"Processing image: {file.filename} ({len(contents)} bytes)")
+        read_time = time.time() - start_time
+        logger.info(
+            f"Processing image: {file.filename} ({len(contents)} bytes) - read: {read_time:.3f}s"
+        )
 
+        decode_start = time.time()
         image = Image.open(io.BytesIO(contents))
 
         # Convert to RGB if necessary (handles RGBA, grayscale, etc.)
         if image.mode != "RGB":
             image = image.convert("RGB")
+        decode_time = time.time() - decode_start
+        logger.info(f"Image decode and convert: {decode_time:.3f}s")
 
         original_width, original_height = image.size
+        original_image = image
+
+        # Resize image for faster detection if needed
+        scale_factor = 1.0
+        if max(original_width, original_height) > max_size:
+            resize_start = time.time()
+            scale_factor = max_size / max(original_width, original_height)
+            new_width = int(original_width * scale_factor)
+            new_height = int(original_height * scale_factor)
+            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            resize_time = time.time() - resize_start
+            logger.info(
+                f"Resized image from {original_width}x{original_height} to {new_width}x{new_height} "
+                f"(scale={scale_factor:.3f}) in {resize_time:.3f}s"
+            )
 
         # Run detection
+        detect_start = time.time()
         detected, detection_data = detector.detect(image, conf_threshold=confidence)
+        detect_time = time.time() - detect_start
+        logger.info(f"YOLO detection: {detect_time:.3f}s")
 
         if not detected or detection_data is None:
+            total_time = time.time() - start_time
+            logger.info(f"Total time (no detection): {total_time:.3f}s")
             return DetectionResponse(
                 success=True,
                 message="No salamander detected in the image",
@@ -145,20 +183,51 @@ async def crop_salamander(
                 original_height=original_height,
             )
 
+        # Rescale bbox coordinates to original image size
+        bbox = detection_data["bbox"]
+        if scale_factor != 1.0:
+            x1_orig = bbox["x1"] / scale_factor
+            y1_orig = bbox["y1"] / scale_factor
+            x2_orig = bbox["x2"] / scale_factor
+            y2_orig = bbox["y2"] / scale_factor
+            logger.info(
+                f"Rescaling bbox from ({bbox['x1']:.1f},{bbox['y1']:.1f},{bbox['x2']:.1f},{bbox['y2']:.1f}) "
+                f"to ({x1_orig:.1f},{y1_orig:.1f},{x2_orig:.1f},{y2_orig:.1f})"
+            )
+        else:
+            x1_orig = bbox["x1"]
+            y1_orig = bbox["y1"]
+            x2_orig = bbox["x2"]
+            y2_orig = bbox["y2"]
+
+        # Crop from original full-size image
+        crop_start = time.time()
+        cropped_image = original_image.crop((x1_orig, y1_orig, x2_orig, y2_orig))
+        crop_time = time.time() - crop_start
+        logger.info(f"Image crop: {crop_time:.3f}s")
+
         # Prepare response
         bbox_data = BoundingBox(
-            x1=detection_data["bbox"]["x1"],
-            y1=detection_data["bbox"]["y1"],
-            x2=detection_data["bbox"]["x2"],
-            y2=detection_data["bbox"]["y2"],
+            x1=x1_orig,
+            y1=y1_orig,
+            x2=x2_orig,
+            y2=y2_orig,
             confidence=detection_data["confidence"],
         )
 
         cropped_base64 = None
         if return_base64:
+            encode_start = time.time()
             cropped_base64 = pil_to_base64(
-                detection_data["cropped_image"], format=image_format, quality=image_quality
+                cropped_image, format=image_format, quality=image_quality
             )
+            encode_time = time.time() - encode_start
+            logger.info(
+                f"Image encoding ({image_format}, quality={image_quality}): {encode_time:.3f}s"
+            )
+
+        total_time = time.time() - start_time
+        logger.info(f"Total processing time: {total_time:.3f}s")
 
         return DetectionResponse(
             success=True,
