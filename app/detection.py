@@ -8,14 +8,10 @@ import torch
 from PIL import Image
 from ultralytics import YOLO
 
-# Add safe globals for PyTorch 2.6+ to allow YOLO model loading
-try:
-    from ultralytics.nn.tasks import DetectionModel
-
-    torch.serialization.add_safe_globals([DetectionModel])
-except (ImportError, AttributeError):
-    # Fallback for older versions or if import fails
-    pass
+# PyTorch 2.6+ compatibility note:
+# PyTorch 2.6 changed the default value of weights_only from False to True in torch.load
+# YOLO models require weights_only=False due to custom classes
+# We handle this by monkey-patching torch.load during model loading (see load_model method)
 
 
 class SalamanderDetector:
@@ -46,8 +42,23 @@ class SalamanderDetector:
                 print(f"Warning: Model file not found at {self.model_path}")
                 return False
 
-            self.model = YOLO(str(self.model_path))
-            print(f"Model loaded successfully from {self.model_path}")
+            # For PyTorch 2.6+, we need to use weights_only=False for YOLO models
+            # Monkey-patch torch.load temporarily to force weights_only=False
+            original_load = torch.load
+
+            def patched_load(*args, **kwargs):
+                # Force weights_only=False for YOLO model loading
+                kwargs.setdefault("weights_only", False)
+                return original_load(*args, **kwargs)
+
+            torch.load = patched_load
+            try:
+                self.model = YOLO(str(self.model_path))
+                print(f"Model loaded successfully from {self.model_path}")
+            finally:
+                # Restore original torch.load
+                torch.load = original_load
+
             return True
         except Exception as e:
             print(f"Error loading model: {e}")
