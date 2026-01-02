@@ -2,17 +2,16 @@
 
 import os
 from pathlib import Path
-from typing import Optional, Tuple
+
 import numpy as np
-from ultralytics import YOLO
 from PIL import Image
-import cv2
+from ultralytics import YOLO
 
 
 class SalamanderDetector:
     """Salamander detector using YOLO."""
 
-    def __init__(self, model_path: Optional[str] = None):
+    def __init__(self, model_path: str | None = None):
         """Initialize the detector with a YOLO model.
 
         Args:
@@ -52,7 +51,7 @@ class SalamanderDetector:
         """
         return self.model is not None
 
-    def detect(self, image: Image.Image, conf_threshold: float = 0.25) -> Tuple[bool, Optional[dict]]:
+    def detect(self, image: Image.Image, conf_threshold: float = 0.25) -> tuple[bool, dict | None]:
         """Detect salamander in an image.
 
         Args:
@@ -91,14 +90,9 @@ class SalamanderDetector:
         cropped = image.crop((x1, y1, x2, y2))
 
         detection_data = {
-            "bbox": {
-                "x1": float(x1),
-                "y1": float(y1),
-                "x2": float(x2),
-                "y2": float(y2)
-            },
+            "bbox": {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)},
             "confidence": confidence,
-            "cropped_image": cropped
+            "cropped_image": cropped,
         }
 
         return True, detection_data

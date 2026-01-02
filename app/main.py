@@ -1,27 +1,25 @@
 """FastAPI application for salamander detection and cropping."""
 
+import io
 import os
 from contextlib import asynccontextmanager
-from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image
-import io
 
 from app import __version__
-from app.models import DetectionResponse, HealthResponse, BoundingBox
 from app.detection import SalamanderDetector
+from app.models import BoundingBox, DetectionResponse, HealthResponse
 from app.utils import pil_to_base64
 
-
 # Global detector instance
-detector: Optional[SalamanderDetector] = None
+detector: SalamanderDetector | None = None
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     """Initialize and cleanup resources."""
     global detector
     # Startup: Load the YOLO model
@@ -37,7 +35,7 @@ app = FastAPI(
     title="Salamander Detection API",
     description="API for detecting and cropping salamanders in images using YOLO",
     version=__version__,
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 # Configure CORS for Next.js integration
@@ -56,7 +54,7 @@ async def root():
     return HealthResponse(
         status="healthy",
         model_loaded=detector is not None and detector.is_model_loaded(),
-        version=__version__
+        version=__version__,
     )
 
 
@@ -66,15 +64,17 @@ async def health_check():
     return HealthResponse(
         status="healthy",
         model_loaded=detector is not None and detector.is_model_loaded(),
-        version=__version__
+        version=__version__,
     )
 
 
 @app.post("/crop-salamander", response_model=DetectionResponse)
 async def crop_salamander(
     file: UploadFile = File(..., description="Image file containing a salamander"),
-    confidence: float = Query(0.25, ge=0.0, le=1.0, description="Confidence threshold for detection"),
-    return_base64: bool = Query(True, description="Whether to return the cropped image as base64")
+    confidence: float = Query(
+        0.25, ge=0.0, le=1.0, description="Confidence threshold for detection"
+    ),
+    return_base64: bool = Query(True, description="Whether to return the cropped image as base64"),
 ):
     """
     Detect and crop a salamander from an uploaded image.
@@ -91,14 +91,14 @@ async def crop_salamander(
     if detector is None or not detector.is_model_loaded():
         raise HTTPException(
             status_code=503,
-            detail="Model not loaded. Please ensure the YOLO model file is available."
+            detail="Model not loaded. Please ensure the YOLO model file is available.",
         )
 
     # Validate file type
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid file type: {file.content_type}. Please upload an image file."
+            detail=f"Invalid file type: {file.content_type}. Please upload an image file.",
         )
 
     try:
@@ -123,7 +123,7 @@ async def crop_salamander(
                 bounding_box=None,
                 cropped_image=None,
                 original_width=original_width,
-                original_height=original_height
+                original_height=original_height,
             )
 
         # Prepare response
@@ -132,7 +132,7 @@ async def crop_salamander(
             y1=detection_data["bbox"]["y1"],
             x2=detection_data["bbox"]["x2"],
             y2=detection_data["bbox"]["y2"],
-            confidence=detection_data["confidence"]
+            confidence=detection_data["confidence"],
         )
 
         cropped_base64 = None
@@ -146,27 +146,21 @@ async def crop_salamander(
             bounding_box=bbox_data,
             cropped_image=cropped_base64,
             original_width=original_width,
-            original_height=original_height
+            original_height=original_height,
         )
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing image: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}") from e
 
 
 @app.get("/model-info")
 async def model_info():
     """Get information about the loaded model."""
     if detector is None:
-        return JSONResponse(
-            status_code=503,
-            content={"error": "Detector not initialized"}
-        )
+        return JSONResponse(status_code=503, content={"error": "Detector not initialized"})
 
     return {
         "model_loaded": detector.is_model_loaded(),
         "model_path": str(detector.model_path),
-        "model_exists": detector.model_path.exists()
+        "model_exists": detector.model_path.exists(),
     }
