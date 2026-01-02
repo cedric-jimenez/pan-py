@@ -29,12 +29,16 @@ COPY models/ ./models/
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Expose port (Railway will override with PORT env variable)
-EXPOSE 8000
+# Set default PORT (Railway will override this)
+ENV PORT=8000
 
-# Health check (using curl instead of requests to avoid extra dependency)
+# Expose port
+EXPOSE ${PORT}
+
+# Health check (using curl with PORT env variable)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:${PORT}/health || exit 1
 
 # Run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Use shell form to allow environment variable substitution
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT}
