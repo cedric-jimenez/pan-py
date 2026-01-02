@@ -84,6 +84,12 @@ async def crop_salamander(
         0.25, ge=0.0, le=1.0, description="Confidence threshold for detection"
     ),
     return_base64: bool = Query(True, description="Whether to return the cropped image as base64"),
+    image_format: str = Query(
+        "JPEG", description="Output image format (JPEG or PNG). JPEG is much faster."
+    ),
+    image_quality: int = Query(
+        85, ge=1, le=95, description="JPEG quality (1-95, only used for JPEG format)"
+    ),
 ):
     """
     Detect and crop a salamander from an uploaded image.
@@ -92,6 +98,8 @@ async def crop_salamander(
         file: Image file (JPEG, PNG, etc.)
         confidence: Confidence threshold for detection (0.0 to 1.0)
         return_base64: Whether to return the cropped image as base64 encoded string
+        image_format: Output format (JPEG or PNG). JPEG is 10-20x faster than PNG.
+        image_quality: JPEG quality (1-95). Lower = faster but lower quality.
 
     Returns:
         DetectionResponse with detection results and optionally the cropped image
@@ -148,7 +156,9 @@ async def crop_salamander(
 
         cropped_base64 = None
         if return_base64:
-            cropped_base64 = pil_to_base64(detection_data["cropped_image"], format="PNG")
+            cropped_base64 = pil_to_base64(
+                detection_data["cropped_image"], format=image_format, quality=image_quality
+            )
 
         return DetectionResponse(
             success=True,
