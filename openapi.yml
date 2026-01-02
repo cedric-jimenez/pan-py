@@ -1,0 +1,340 @@
+openapi: 3.1.0
+info:
+  title: Salamander Detection API
+  description: |
+    API REST pour détecter et cropper des salamandres dans des images en utilisant un modèle YOLO custom.
+
+    ## Fonctionnalités
+    - Détection automatique de salamandres avec YOLO
+    - Cropping intelligent centré sur la salamandre détectée
+    - Réponse en base64 pour faciliter l'utilisation côté frontend
+    - Support CORS pour intégration avec Next.js/Vercel
+
+    ## Utilisation
+    1. Envoyez une image via POST /crop-salamander
+    2. Recevez la détection avec bounding box et image croppée en base64
+    3. Utilisez l'image croppée directement dans votre frontend
+  version: 0.1.0
+  contact:
+    name: Cédric Jimenez
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8000
+    description: Serveur de développement local
+  - url: https://your-api.railway.app
+    description: Serveur de production (Railway)
+
+tags:
+  - name: health
+    description: Endpoints de santé et monitoring
+  - name: detection
+    description: Endpoints de détection de salamandres
+
+paths:
+  /:
+    get:
+      tags:
+        - health
+      summary: Root endpoint
+      description: Endpoint racine avec informations sur l'état de l'API
+      operationId: root
+      responses:
+        '200':
+          description: État de l'API
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: healthy
+                yolo_loaded: true
+                version: 0.1.0
+
+  /health:
+    get:
+      tags:
+        - health
+      summary: Health check
+      description: Vérifier l'état de l'API et du modèle YOLO
+      operationId: health_check
+      responses:
+        '200':
+          description: État de l'API
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: healthy
+                yolo_loaded: true
+                version: 0.1.0
+
+  /model-info:
+    get:
+      tags:
+        - health
+      summary: Informations sur le modèle
+      description: Obtenir des informations détaillées sur le modèle YOLO chargé
+      operationId: model_info
+      responses:
+        '200':
+          description: Informations sur le modèle
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  model_loaded:
+                    type: boolean
+                    description: Si le modèle est chargé
+                  model_path:
+                    type: string
+                    description: Chemin vers le fichier modèle
+                  model_exists:
+                    type: boolean
+                    description: Si le fichier modèle existe
+              example:
+                model_loaded: true
+                model_path: models/best.pt
+                model_exists: true
+        '503':
+          description: Détecteur non initialisé
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+              example:
+                error: Detector not initialized
+
+  /crop-salamander:
+    post:
+      tags:
+        - detection
+      summary: Détecter et cropper une salamandre
+      description: |
+        Détecte une salamandre dans une image uploadée et retourne :
+        - La bounding box de détection
+        - L'image croppée en base64
+        - Les dimensions de l'image originale
+
+        Formats d'image supportés : JPEG, PNG, BMP, etc.
+      operationId: crop_salamander
+      parameters:
+        - name: confidence
+          in: query
+          description: Seuil de confiance pour la détection (0.0 à 1.0)
+          required: false
+          schema:
+            type: number
+            format: float
+            minimum: 0.0
+            maximum: 1.0
+            default: 0.25
+          example: 0.25
+        - name: return_base64
+          in: query
+          description: Retourner l'image croppée en base64
+          required: false
+          schema:
+            type: boolean
+            default: true
+          example: true
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Fichier image contenant une salamandre
+              required:
+                - file
+      responses:
+        '200':
+          description: Détection réussie
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetectionResponse'
+              examples:
+                detected:
+                  summary: Salamandre détectée
+                  value:
+                    success: true
+                    message: Salamander detected and cropped successfully
+                    detected: true
+                    bounding_box:
+                      x1: 145.2
+                      y1: 203.7
+                      x2: 456.8
+                      y2: 512.3
+                      confidence: 0.87
+                    cropped_image: iVBORw0KGgoAAAANSUhEUgAA...
+                    original_width: 1920
+                    original_height: 1080
+                not_detected:
+                  summary: Aucune salamandre détectée
+                  value:
+                    success: true
+                    message: No salamander detected in the image
+                    detected: false
+                    bounding_box: null
+                    cropped_image: null
+                    original_width: 1920
+                    original_height: 1080
+        '400':
+          description: Fichier invalide
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+              example:
+                detail: "Invalid file type: application/pdf. Please upload an image file."
+        '422':
+          description: Erreur de validation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: array
+                    items:
+                      type: object
+              example:
+                detail:
+                  - loc: [query, confidence]
+                    msg: ensure this value is less than or equal to 1.0
+                    type: value_error.number.not_le
+        '500':
+          description: Erreur serveur
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+              example:
+                detail: "Error processing image: Model not loaded"
+        '503':
+          description: Modèle non chargé
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+              example:
+                detail: Model not loaded. Please ensure the YOLO model file is available.
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - yolo_loaded
+        - version
+      properties:
+        status:
+          type: string
+          description: État du service
+          example: healthy
+        yolo_loaded:
+          type: boolean
+          description: Si le modèle YOLO est chargé
+          example: true
+        version:
+          type: string
+          description: Version de l'API
+          example: 0.1.0
+
+    BoundingBox:
+      type: object
+      required:
+        - x1
+        - y1
+        - x2
+        - y2
+        - confidence
+      properties:
+        x1:
+          type: number
+          format: float
+          description: Coordonnée x du coin supérieur gauche
+          example: 145.2
+        y1:
+          type: number
+          format: float
+          description: Coordonnée y du coin supérieur gauche
+          example: 203.7
+        x2:
+          type: number
+          format: float
+          description: Coordonnée x du coin inférieur droit
+          example: 456.8
+        y2:
+          type: number
+          format: float
+          description: Coordonnée y du coin inférieur droit
+          example: 512.3
+        confidence:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: Score de confiance de la détection
+          example: 0.87
+
+    DetectionResponse:
+      type: object
+      required:
+        - success
+        - message
+        - detected
+        - original_width
+        - original_height
+      properties:
+        success:
+          type: boolean
+          description: Si la détection s'est bien passée
+          example: true
+        message:
+          type: string
+          description: Message de statut
+          example: Salamander detected and cropped successfully
+        detected:
+          type: boolean
+          description: Si une salamandre a été détectée
+          example: true
+        bounding_box:
+          allOf:
+            - $ref: '#/components/schemas/BoundingBox'
+          nullable: true
+          description: Bounding box de la salamandre détectée
+        cropped_image:
+          type: string
+          nullable: true
+          description: Image croppée encodée en base64
+          example: iVBORw0KGgoAAAANSUhEUgAA...
+        original_width:
+          type: integer
+          description: Largeur de l'image originale
+          example: 1920
+        original_height:
+          type: integer
+          description: Hauteur de l'image originale
+          example: 1080

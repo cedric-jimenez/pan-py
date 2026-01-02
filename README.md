@@ -225,12 +225,18 @@ pan-py/
 │   └── utils.py                 # Utility functions
 ├── models/
 │   └── best.pt                  # YOLO model (à ajouter)
-├── tests/                       # Tests unitaires (à venir)
+├── tests/                       # Tests unitaires
+│   ├── __init__.py
+│   └── test_main.py
+├── .github/
+│   └── workflows/
+│       └── ci.yml               # GitHub Actions CI/CD
 ├── requirements.txt             # Python dependencies
 ├── requirements-dev.txt         # Dev dependencies (linting, tests)
 ├── pyproject.toml               # Project config (Ruff, Black, mypy)
 ├── Makefile                     # Dev commands (lint, format, test)
 ├── .pre-commit-config.yaml      # Pre-commit hooks configuration
+├── openapi.yml                  # OpenAPI 3.1 specification
 ├── Dockerfile                   # Docker configuration
 ├── railway.toml                 # Railway configuration
 ├── .dockerignore               # Docker ignore rules
@@ -348,12 +354,40 @@ Tous les outils sont configurés dans `pyproject.toml` :
 - Black : ligne max 100 caractères, Python 3.11+
 - mypy : vérifications strictes avec imports flexibles
 
-## 📊 Documentation API interactive
+## 📊 Documentation API
+
+### Documentation interactive
 
 FastAPI génère automatiquement une documentation interactive :
 
 - **Swagger UI** : `http://localhost:8000/docs`
 - **ReDoc** : `http://localhost:8000/redoc`
+
+### Spécification OpenAPI
+
+Le fichier `openapi.yml` contient la spécification complète de l'API au format OpenAPI 3.1.0.
+
+**Utilisation :**
+
+```bash
+# Voir la spec
+cat openapi.yml
+
+# Importer dans Postman, Insomnia, ou tout autre client API
+# File → Import → openapi.yml
+
+# Générer un client SDK
+npx @openapitools/openapi-generator-cli generate \
+  -i openapi.yml \
+  -g typescript-fetch \
+  -o ./generated-client
+```
+
+**Endpoints documentés :**
+- `GET /` - Root endpoint
+- `GET /health` - Health check
+- `GET /model-info` - Informations sur le modèle
+- `POST /crop-salamander` - Détection et cropping
 
 ## 🐛 Dépannage
 
