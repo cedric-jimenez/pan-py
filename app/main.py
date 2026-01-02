@@ -1,27 +1,26 @@
 """FastAPI application for salamander detection and cropping."""
 
+import io
 import os
 from contextlib import asynccontextmanager
-from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image
-import io
 
 from app import __version__
-from app.models import DetectionResponse, HealthResponse, BoundingBox
 from app.detection import SalamanderDetector
+from app.models import BoundingBox, DetectionResponse, HealthResponse
 from app.utils import pil_to_base64
 
 
 # Global detector instance
-detector: Optional[SalamanderDetector] = None
+detector: SalamanderDetector | None = None
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     """Initialize and cleanup resources."""
     global detector
     # Startup: Load the YOLO model
@@ -153,7 +152,7 @@ async def crop_salamander(
         raise HTTPException(
             status_code=500,
             detail=f"Error processing image: {str(e)}"
-        )
+        ) from e
 
 
 @app.get("/model-info")

@@ -1,6 +1,5 @@
 """Pydantic models for request/response validation."""
 
-from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -18,8 +17,8 @@ class DetectionResponse(BaseModel):
     success: bool = Field(..., description="Whether detection was successful")
     message: str = Field(..., description="Status message")
     detected: bool = Field(..., description="Whether a salamander was detected")
-    bounding_box: Optional[BoundingBox] = Field(None, description="Bounding box of detected salamander")
-    cropped_image: Optional[str] = Field(None, description="Base64 encoded cropped image")
+    bounding_box: BoundingBox | None = Field(None, description="Bounding box of detected salamander")
+    cropped_image: str | None = Field(None, description="Base64 encoded cropped image")
     original_width: int = Field(..., description="Original image width")
     original_height: int = Field(..., description="Original image height")
 
