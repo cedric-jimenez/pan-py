@@ -43,10 +43,10 @@ test-cov: ## Run tests with coverage
 	pytest tests/ -v --cov=app --cov-report=html --cov-report=term
 
 run: ## Run the FastAPI development server
-	uvicorn $(APP_MODULE) --reload --host 0.0.0.0 --port 8000
+	uvicorn $(APP_MODULE) --reload --host 0.0.0.0 --port 8000 --log-config app/uvicorn_logging_config.json
 
 run-prod: ## Run the FastAPI production server
-	uvicorn $(APP_MODULE) --host 0.0.0.0 --port 8000
+	uvicorn $(APP_MODULE) --host 0.0.0.0 --port 8000 --log-config app/uvicorn_logging_config.json
 
 docker-build: ## Build Docker image
 	docker build -t salamander-detection-api:latest .
