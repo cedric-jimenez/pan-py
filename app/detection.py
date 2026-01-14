@@ -4,6 +4,7 @@ import logging
 import os
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -131,3 +132,142 @@ class SalamanderDetector:
         }
 
         return True, detection_data
+
+class SalamanderSegmenter:
+    """Salamander segmenter using YOLO-seg for precise mask-based cropping."""
+
+    def __init__(self, model_path: str | None = None):
+        """Initialize the segmenter with a YOLO segmentation model.
+
+        Args:
+            model_path: Path to the YOLO-seg .pt model file.
+                       If None, uses default path from environment or models/segment.pt
+        """
+        if model_path is None:
+            model_path = os.getenv("YOLO_SEGMENT_MODEL_PATH", "models/segment.pt")
+
+        self.model_path = Path(model_path)
+        self.model = None
+        self.load_model()
+
+    def load_model(self) -> bool:
+        """Load the YOLO segmentation model.
+
+        Returns:
+            bool: True if model loaded successfully, False otherwise
+        """
+        try:
+            if not self.model_path.exists():
+                logger.error(f"Segmentation model file not found at {self.model_path}")
+                return False
+
+            original_load = torch.load
+
+            def patched_load(*args, **kwargs):
+                kwargs.setdefault("weights_only", False)
+                return original_load(*args, **kwargs)
+
+            torch.load = patched_load
+            try:
+                self.model = YOLO(str(self.model_path))
+                logger.info(f"Segmentation model loaded successfully: {self.model_path.name}")
+                if self.model is not None and hasattr(self.model, "names"):
+                    logger.info(f"Model classes: {self.model.names}")
+            finally:
+                torch.load = original_load
+
+            return True
+        except Exception as e:
+            logger.error(f"Error loading segmentation model: {e}")
+            return False
+
+    def is_model_loaded(self) -> bool:
+        """Check if model is loaded."""
+        return self.model is not None
+
+    def segment(
+        self,
+        image: Image.Image,
+        conf_threshold: float = 0.25,
+        bg_color: tuple = (150, 150, 150),
+    ) -> tuple[bool, dict | None]:
+        """Segment salamander and return masked image with background removed.
+
+        Args:
+            image: PIL Image object
+            conf_threshold: Confidence threshold for detection
+            bg_color: RGB tuple for background color (default: gray 150)
+
+        Returns:
+            Tuple of (detected: bool, segmentation_data: dict or None)
+        """
+        if self.model is None:
+            raise RuntimeError("Segmentation model not loaded.")
+
+        logger.info(
+            f"Running segmentation: size={image.size}, mode={image.mode}, conf={conf_threshold}"
+        )
+
+        results = self.model(image, conf=conf_threshold, verbose=False)
+
+        if len(results) == 0 or results[0].masks is None or len(results[0].masks) == 0:
+            logger.info("No salamanders detected for segmentation")
+            return False, None
+
+        # Get best detection
+        masks = results[0].masks
+        boxes = results[0].boxes
+        confidences = boxes.conf.cpu().numpy()
+        best_idx = np.argmax(confidences)
+
+        mask = masks.data[best_idx].cpu().numpy()
+        bbox = boxes.xyxy[best_idx].cpu().numpy()
+        confidence = float(confidences[best_idx])
+
+        x1, y1, x2, y2 = map(int, bbox)
+        logger.info(
+            f"Salamander segmented: bbox=({x1},{y1},{x2},{y2}), confidence={confidence:.2%}"
+        )
+
+        # Apply mask and crop
+        segmented_image = self._apply_mask(image, mask, bbox, bg_color)
+
+        return True, {
+            "bbox": {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)},
+            "confidence": confidence,
+            "segmented_image": segmented_image,
+        }
+
+    def _apply_mask(
+        self,
+        image: Image.Image,
+        mask: np.ndarray,
+        bbox: np.ndarray,
+        bg_color: tuple,
+    ) -> Image.Image:
+        """Apply segmentation mask to image with custom background color.
+
+        Args:
+            image: Original PIL Image
+            mask: Binary mask from YOLO segmentation
+            bbox: Bounding box coordinates [x1, y1, x2, y2]
+            bg_color: RGB tuple for background
+
+        Returns:
+            Cropped PIL Image with mask applied
+        """
+        img_array = np.array(image)
+
+        # Resize mask to image dimensions
+        mask_resized = cv2.resize(mask, (image.width, image.height))
+        mask_bool = mask_resized > 0.5
+
+        # Create result with background color
+        result = np.ones_like(img_array) * np.array(bg_color, dtype=np.uint8)
+        result[mask_bool] = img_array[mask_bool]
+
+        # Crop to bounding box
+        x1, y1, x2, y2 = map(int, bbox)
+        cropped = Image.fromarray(result).crop((x1, y1, x2, y2))
+
+        return cropped

@@ -23,6 +23,32 @@ venv: ## Create virtual environment
 	$(PYTHON) -m venv $(VENV)
 	@echo "Virtual environment created. Activate it with: source $(VENV)/bin/activate"
 
+clean-install: ## Clean install - recreate venv and install all dependencies
+	@echo "🧹 Clean install starting..."
+	@if [ -n "$$VIRTUAL_ENV" ]; then \
+		echo "⚠️  Virtual environment is active. Please run 'deactivate' first."; \
+		exit 1; \
+	fi
+	@if [ -d "$(VENV)" ]; then \
+		echo "📦 Backing up old venv to venv.old..."; \
+		rm -rf venv.old; \
+		mv $(VENV) venv.old; \
+	fi
+	@echo "🆕 Creating new virtual environment..."
+	$(PYTHON) -m venv $(VENV)
+	@echo "✅ Virtual environment created!"
+	@echo ""
+	@echo "🔧 Next steps:"
+	@echo "   1. Activate: source $(VENV)/bin/activate"
+	@echo "   2. Install: make install-dev"
+	@echo ""
+	@echo "💡 Quick command:"
+	@echo "   source $(VENV)/bin/activate && make install-dev"
+
+activate: ## Show command to activate virtual environment
+	@echo "Run this command to activate the virtual environment:"
+	@echo "source $(VENV)/bin/activate"
+
 format: ## Format code with Black
 	black app/
 	ruff check --fix app/
