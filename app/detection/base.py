@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # We handle this by monkey-patching torch.load during model loading (see load_model method)
 
 
-class YOLOModelBase(ABC):
+class YOLOModelBase(ABC):  # noqa: B024
     """Base class for YOLO-based models (detection and segmentation).
 
     This class eliminates code duplication by providing common functionality

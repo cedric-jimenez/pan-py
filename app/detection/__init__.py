@@ -10,8 +10,8 @@ Public API:
     - YOLOModelBase: Base class for custom YOLO models (advanced usage)
 """
 
-from .config import YOLOConfig
 from .base import YOLOModelBase
+from .config import YOLOConfig
 from .detector import SalamanderDetector
 from .segmenter import SalamanderSegmenter
 
