@@ -36,7 +36,8 @@ ENV PORT=8000
 EXPOSE ${PORT}
 
 # Health check (using curl with PORT env variable)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+# Note: start-period=30s to allow time for YOLO models to load (~10-20s)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
 # Run the application with JSON logging

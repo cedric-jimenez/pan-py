@@ -1,9 +1,13 @@
 """Tests for the main FastAPI application."""
 
 import pytest
+import warnings
 from fastapi.testclient import TestClient
 
 from app.main import app
+
+# Suppress httpx deprecation warning about 'app' shortcut
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="httpx")
 
 client = TestClient(app)
 
@@ -29,9 +33,12 @@ def test_root_endpoint():
 def test_model_info_endpoint():
     """Test the model info endpoint."""
     response = client.get("/model-info")
-    assert response.status_code in [200, 503]  # 503 if model not loaded
+    assert response.status_code == 200
     data = response.json()
-    assert "model_loaded" in data or "error" in data
+    assert "detection" in data
+    assert "segmentation" in data
+    assert "loaded" in data["detection"]
+    assert "loaded" in data["segmentation"]
 
 
 @pytest.mark.asyncio

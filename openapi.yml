@@ -1,340 +1,434 @@
 openapi: 3.1.0
 info:
   title: Salamander Detection API
-  description: |
-    API REST pour détecter et cropper des salamandres dans des images en utilisant un modèle YOLO custom.
+  description: 'API REST pour détecter et cropper des salamandres dans des images
+    en utilisant un modèle YOLO custom.
+
 
     ## Fonctionnalités
+
     - Détection automatique de salamandres avec YOLO
+
     - Cropping intelligent centré sur la salamandre détectée
-    - Réponse en base64 pour faciliter l'utilisation côté frontend
+
+    - Réponse en base64 pour faciliter l''utilisation côté frontend
+
     - Support CORS pour intégration avec Next.js/Vercel
 
+
     ## Utilisation
+
     1. Envoyez une image via POST /crop-salamander
+
     2. Recevez la détection avec bounding box et image croppée en base64
-    3. Utilisez l'image croppée directement dans votre frontend
+
+    3. Utilisez l''image croppée directement dans votre frontend
+
+    '
   version: 0.1.0
   contact:
     name: Cédric Jimenez
   license:
     name: MIT
-
-servers:
-  - url: http://localhost:8000
-    description: Serveur de développement local
-  - url: https://your-api.railway.app
-    description: Serveur de production (Railway)
-
-tags:
-  - name: health
-    description: Endpoints de santé et monitoring
-  - name: detection
-    description: Endpoints de détection de salamandres
-
 paths:
   /:
     get:
-      tags:
-        - health
-      summary: Root endpoint
-      description: Endpoint racine avec informations sur l'état de l'API
-      operationId: root
+      summary: Root
+      description: Root endpoint with API information.
+      operationId: root__get
       responses:
         '200':
-          description: État de l'API
+          description: Successful Response
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
-              example:
-                status: healthy
-                yolo_loaded: true
-                version: 0.1.0
-
   /health:
     get:
-      tags:
-        - health
-      summary: Health check
-      description: Vérifier l'état de l'API et du modèle YOLO
-      operationId: health_check
+      summary: Health Check
+      description: Health check endpoint.
+      operationId: health_check_health_get
       responses:
         '200':
-          description: État de l'API
+          description: Successful Response
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
-              example:
-                status: healthy
-                yolo_loaded: true
-                version: 0.1.0
-
-  /model-info:
-    get:
-      tags:
-        - health
-      summary: Informations sur le modèle
-      description: Obtenir des informations détaillées sur le modèle YOLO chargé
-      operationId: model_info
-      responses:
-        '200':
-          description: Informations sur le modèle
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  model_loaded:
-                    type: boolean
-                    description: Si le modèle est chargé
-                  model_path:
-                    type: string
-                    description: Chemin vers le fichier modèle
-                  model_exists:
-                    type: boolean
-                    description: Si le fichier modèle existe
-              example:
-                model_loaded: true
-                model_path: models/best.pt
-                model_exists: true
-        '503':
-          description: Détecteur non initialisé
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: string
-              example:
-                error: Detector not initialized
-
   /crop-salamander:
     post:
-      tags:
-        - detection
-      summary: Détecter et cropper une salamandre
-      description: |
-        Détecte une salamandre dans une image uploadée et retourne :
-        - La bounding box de détection
-        - L'image croppée en base64
-        - Les dimensions de l'image originale
-
-        Formats d'image supportés : JPEG, PNG, BMP, etc.
-      operationId: crop_salamander
+      summary: Crop Salamander
+      description: "Detect and crop a salamander from an uploaded image.\n\nArgs:\n\
+        \    file: Image file (JPEG, PNG, etc.)\n    confidence: Confidence threshold\
+        \ for detection (0.0 to 1.0)\n    return_base64: Whether to return the cropped\
+        \ image as base64 encoded string\n    image_format: Output format (JPEG or\
+        \ PNG). JPEG is 10-20x faster than PNG.\n    image_quality: JPEG quality (1-95).\
+        \ Lower = faster but lower quality.\n    max_size: Max dimension for detection.\
+        \ Images larger than this will be resized\n              for faster detection.\
+        \ The crop is done on the original full-size image.\n\nReturns:\n    DetectionResponse\
+        \ with detection results and optionally the cropped image"
+      operationId: crop_salamander_crop_salamander_post
       parameters:
-        - name: confidence
-          in: query
-          description: Seuil de confiance pour la détection (0.0 à 1.0)
-          required: false
-          schema:
-            type: number
-            format: float
-            minimum: 0.0
-            maximum: 1.0
-            default: 0.25
-          example: 0.25
-        - name: return_base64
-          in: query
-          description: Retourner l'image croppée en base64
-          required: false
-          schema:
-            type: boolean
-            default: true
-          example: true
+      - name: confidence
+        in: query
+        required: false
+        schema:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          description: Confidence threshold for detection
+          default: 0.25
+          title: Confidence
+        description: Confidence threshold for detection
+      - name: return_base64
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: Whether to return the cropped image as base64
+          default: true
+          title: Return Base64
+        description: Whether to return the cropped image as base64
+      - name: image_format
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Output image format (JPEG or PNG). JPEG is much faster.
+          default: JPEG
+          title: Image Format
+        description: Output image format (JPEG or PNG). JPEG is much faster.
+      - name: image_quality
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 95
+          minimum: 1
+          description: JPEG quality (1-95, only used for JPEG format)
+          default: 85
+          title: Image Quality
+        description: JPEG quality (1-95, only used for JPEG format)
+      - name: max_size
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 4096
+          minimum: 320
+          description: Max dimension for detection (image resized if larger). Smaller
+            = faster.
+          default: 1280
+          title: Max Size
+        description: Max dimension for detection (image resized if larger). Smaller
+          = faster.
       requestBody:
         required: true
         content:
           multipart/form-data:
             schema:
-              type: object
-              properties:
-                file:
-                  type: string
-                  format: binary
-                  description: Fichier image contenant une salamandre
-              required:
-                - file
+              $ref: '#/components/schemas/Body_crop_salamander_crop_salamander_post'
       responses:
         '200':
-          description: Détection réussie
+          description: Successful Response
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/DetectionResponse'
-              examples:
-                detected:
-                  summary: Salamandre détectée
-                  value:
-                    success: true
-                    message: Salamander detected and cropped successfully
-                    detected: true
-                    bounding_box:
-                      x1: 145.2
-                      y1: 203.7
-                      x2: 456.8
-                      y2: 512.3
-                      confidence: 0.87
-                    cropped_image: iVBORw0KGgoAAAANSUhEUgAA...
-                    original_width: 1920
-                    original_height: 1080
-                not_detected:
-                  summary: Aucune salamandre détectée
-                  value:
-                    success: true
-                    message: No salamander detected in the image
-                    detected: false
-                    bounding_box: null
-                    cropped_image: null
-                    original_width: 1920
-                    original_height: 1080
-        '400':
-          description: Fichier invalide
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  detail:
-                    type: string
-              example:
-                detail: "Invalid file type: application/pdf. Please upload an image file."
         '422':
-          description: Erreur de validation
+          description: Validation Error
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  detail:
-                    type: array
-                    items:
-                      type: object
-              example:
-                detail:
-                  - loc: [query, confidence]
-                    msg: ensure this value is less than or equal to 1.0
-                    type: value_error.number.not_le
-        '500':
-          description: Erreur serveur
+                $ref: '#/components/schemas/HTTPValidationError'
+  /segment-salamander:
+    post:
+      summary: Segment Salamander
+      description: "Segment a salamander from an uploaded image using YOLO instance\
+        \ segmentation.\n\nThis endpoint provides precise mask-based cropping that\
+        \ removes the background,\nunlike /crop-salamander which returns a rectangular\
+        \ crop with background included.\n\nArgs:\n    file: Image file (JPEG, PNG,\
+        \ etc.)\n    confidence: Confidence threshold for detection (0.0 to 1.0)\n\
+        \    background: Background color for the segmented image (gray, white, black)\n\
+        \    image_format: Output format (JPEG or PNG). JPEG is faster.\n    image_quality:\
+        \ JPEG quality (1-95). Lower = faster but lower quality.\n\nReturns:\n   \
+        \ SegmentationResponse with segmentation results and the masked image"
+      operationId: segment_salamander_segment_salamander_post
+      parameters:
+      - name: confidence
+        in: query
+        required: false
+        schema:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          description: Confidence threshold for detection
+          default: 0.25
+          title: Confidence
+        description: Confidence threshold for detection
+      - name: background
+        in: query
+        required: false
+        schema:
+          type: string
+          description: 'Background color: gray, white, or black'
+          default: gray
+          title: Background
+        description: 'Background color: gray, white, or black'
+      - name: image_format
+        in: query
+        required: false
+        schema:
+          type: string
+          description: Output image format (JPEG or PNG). JPEG is much faster.
+          default: JPEG
+          title: Image Format
+        description: Output image format (JPEG or PNG). JPEG is much faster.
+      - name: image_quality
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 95
+          minimum: 1
+          description: JPEG quality (1-95, only used for JPEG format)
+          default: 85
+          title: Image Quality
+        description: JPEG quality (1-95, only used for JPEG format)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_segment_salamander_segment_salamander_post'
+      responses:
+        '200':
+          description: Successful Response
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  detail:
-                    type: string
-              example:
-                detail: "Error processing image: Model not loaded"
-        '503':
-          description: Modèle non chargé
+                $ref: '#/components/schemas/SegmentationResponse'
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  detail:
-                    type: string
-              example:
-                detail: Model not loaded. Please ensure the YOLO model file is available.
-
+                $ref: '#/components/schemas/HTTPValidationError'
+  /model-info:
+    get:
+      summary: Model Info
+      description: Get information about the loaded models.
+      operationId: model_info_model_info_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
 components:
   schemas:
-    HealthResponse:
-      type: object
-      required:
-        - status
-        - yolo_loaded
-        - version
+    Body_crop_salamander_crop_salamander_post:
       properties:
-        status:
+        file:
           type: string
-          description: État du service
-          example: healthy
-        yolo_loaded:
-          type: boolean
-          description: Si le modèle YOLO est chargé
-          example: true
-        version:
-          type: string
-          description: Version de l'API
-          example: 0.1.0
-
-    BoundingBox:
+          format: binary
+          title: File
+          description: Image file containing a salamander
       type: object
       required:
-        - x1
-        - y1
-        - x2
-        - y2
-        - confidence
+      - file
+      title: Body_crop_salamander_crop_salamander_post
+    Body_segment_salamander_segment_salamander_post:
+      properties:
+        file:
+          type: string
+          format: binary
+          title: File
+          description: Image file containing a salamander
+      type: object
+      required:
+      - file
+      title: Body_segment_salamander_segment_salamander_post
+    BoundingBox:
       properties:
         x1:
           type: number
-          format: float
-          description: Coordonnée x du coin supérieur gauche
-          example: 145.2
+          title: X1
+          description: Top-left x coordinate
         y1:
           type: number
-          format: float
-          description: Coordonnée y du coin supérieur gauche
-          example: 203.7
+          title: Y1
+          description: Top-left y coordinate
         x2:
           type: number
-          format: float
-          description: Coordonnée x du coin inférieur droit
-          example: 456.8
+          title: X2
+          description: Bottom-right x coordinate
         y2:
           type: number
-          format: float
-          description: Coordonnée y du coin inférieur droit
-          example: 512.3
+          title: Y2
+          description: Bottom-right y coordinate
         confidence:
           type: number
-          format: float
-          minimum: 0.0
           maximum: 1.0
-          description: Score de confiance de la détection
-          example: 0.87
-
-    DetectionResponse:
+          minimum: 0.0
+          title: Confidence
+          description: Detection confidence score
       type: object
       required:
-        - success
-        - message
-        - detected
-        - original_width
-        - original_height
+      - x1
+      - y1
+      - x2
+      - y2
+      - confidence
+      title: BoundingBox
+      description: Bounding box coordinates.
+    DetectionResponse:
       properties:
         success:
           type: boolean
-          description: Si la détection s'est bien passée
-          example: true
+          title: Success
+          description: Whether detection was successful
         message:
           type: string
-          description: Message de statut
-          example: Salamander detected and cropped successfully
+          title: Message
+          description: Status message
         detected:
           type: boolean
-          description: Si une salamandre a été détectée
-          example: true
+          title: Detected
+          description: Whether a salamander was detected
         bounding_box:
-          allOf:
-            - $ref: '#/components/schemas/BoundingBox'
-          nullable: true
-          description: Bounding box de la salamandre détectée
+          anyOf:
+          - $ref: '#/components/schemas/BoundingBox'
+          - type: 'null'
+          description: Bounding box of detected salamander
         cropped_image:
-          type: string
-          nullable: true
-          description: Image croppée encodée en base64
-          example: iVBORw0KGgoAAAANSUhEUgAA...
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cropped Image
+          description: Base64 encoded cropped image
         original_width:
           type: integer
-          description: Largeur de l'image originale
-          example: 1920
+          title: Original Width
+          description: Original image width
         original_height:
           type: integer
-          description: Hauteur de l'image originale
-          example: 1080
+          title: Original Height
+          description: Original image height
+      type: object
+      required:
+      - success
+      - message
+      - detected
+      - original_width
+      - original_height
+      title: DetectionResponse
+      description: Response model for salamander detection.
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    HealthResponse:
+      properties:
+        status:
+          type: string
+          title: Status
+          description: Service status
+        yolo_loaded:
+          type: boolean
+          title: Yolo Loaded
+          description: Whether YOLO model is loaded
+        segment_loaded:
+          type: boolean
+          title: Segment Loaded
+          description: Whether segmentation model is loaded
+          default: false
+        version:
+          type: string
+          title: Version
+          description: API version
+      type: object
+      required:
+      - status
+      - yolo_loaded
+      - version
+      title: HealthResponse
+      description: Health check response.
+    SegmentationResponse:
+      properties:
+        success:
+          type: boolean
+          title: Success
+          description: Whether segmentation was successful
+        message:
+          type: string
+          title: Message
+          description: Status message
+        detected:
+          type: boolean
+          title: Detected
+          description: Whether a salamander was detected
+        bounding_box:
+          anyOf:
+          - $ref: '#/components/schemas/BoundingBox'
+          - type: 'null'
+          description: Bounding box of detected salamander
+        segmented_image:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Segmented Image
+          description: Base64 encoded segmented image with background removed
+        original_width:
+          type: integer
+          title: Original Width
+          description: Original image width
+        original_height:
+          type: integer
+          title: Original Height
+          description: Original image height
+        background_color:
+          type: string
+          title: Background Color
+          description: Background color used (gray, white, black)
+      type: object
+      required:
+      - success
+      - message
+      - detected
+      - original_width
+      - original_height
+      - background_color
+      title: SegmentationResponse
+      description: Response model for salamander segmentation.
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
+servers:
+- url: http://localhost:8000
+  description: Serveur de développement local
+- url: https://your-api.railway.app
+  description: Serveur de production (Railway)

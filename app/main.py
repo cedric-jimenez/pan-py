@@ -8,13 +8,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from PIL import Image
 from pythonjsonlogger import jsonlogger
 
 from app import __version__
-from app.detection import SalamanderDetector
-from app.models import BoundingBox, DetectionResponse, HealthResponse
+from app.detection import SalamanderDetector, SalamanderSegmenter
+from app.models import BoundingBox, DetectionResponse, HealthResponse, SegmentationResponse
 from app.utils import pil_to_base64
 
 # Configure JSON logging for Railway
@@ -31,17 +30,20 @@ root_logger.addHandler(log_handler)
 
 logger = logging.getLogger(__name__)
 
-# Global detector instance
+# Global detector and segmenter instances
 detector: SalamanderDetector | None = None
+segmenter: SalamanderSegmenter | None = None
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Initialize and cleanup resources."""
-    global detector
-    # Startup: Load the YOLO model
-    logger.info("Loading YOLO model...")
+    global detector, segmenter
+    # Startup: Load the YOLO models
+    logger.info("Loading YOLO detection model...")
     detector = SalamanderDetector()
+    logger.info("Loading YOLO segmentation model...")
+    segmenter = SalamanderSegmenter()
     yield
     # Shutdown: cleanup if needed
     logger.info("Shutting down...")
@@ -71,6 +73,7 @@ async def root():
     return HealthResponse(
         status="healthy",
         yolo_loaded=detector is not None and detector.is_model_loaded(),
+        segment_loaded=segmenter is not None and segmenter.is_model_loaded(),
         version=__version__,
     )
 
@@ -81,6 +84,7 @@ async def health_check():
     return HealthResponse(
         status="healthy",
         yolo_loaded=detector is not None and detector.is_model_loaded(),
+        segment_loaded=segmenter is not None and segmenter.is_model_loaded(),
         version=__version__,
     )
 
@@ -252,14 +256,160 @@ async def crop_salamander(
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}") from e
 
 
+# Background color mapping
+BACKGROUND_COLORS = {
+    "gray": (150, 150, 150),
+    "white": (255, 255, 255),
+    "black": (0, 0, 0),
+}
+
+
+@app.post("/segment-salamander", response_model=SegmentationResponse)
+async def segment_salamander(
+    file: UploadFile = File(..., description="Image file containing a salamander"),
+    confidence: float = Query(
+        0.25, ge=0.0, le=1.0, description="Confidence threshold for detection"
+    ),
+    background: str = Query("gray", description="Background color: gray, white, or black"),
+    image_format: str = Query(
+        "JPEG", description="Output image format (JPEG or PNG). JPEG is much faster."
+    ),
+    image_quality: int = Query(
+        85, ge=1, le=95, description="JPEG quality (1-95, only used for JPEG format)"
+    ),
+):
+    """
+    Segment a salamander from an uploaded image using YOLO instance segmentation.
+
+    This endpoint provides precise mask-based cropping that removes the background,
+    unlike /crop-salamander which returns a rectangular crop with background included.
+
+    Args:
+        file: Image file (JPEG, PNG, etc.)
+        confidence: Confidence threshold for detection (0.0 to 1.0)
+        background: Background color for the segmented image (gray, white, black)
+        image_format: Output format (JPEG or PNG). JPEG is faster.
+        image_quality: JPEG quality (1-95). Lower = faster but lower quality.
+
+    Returns:
+        SegmentationResponse with segmentation results and the masked image
+    """
+    # Validate segmenter is loaded
+    if segmenter is None or not segmenter.is_model_loaded():
+        raise HTTPException(
+            status_code=503,
+            detail="Segmentation model not loaded. Please ensure segment.pt is available.",
+        )
+
+    # Validate background color
+    if background not in BACKGROUND_COLORS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid background color: {background}. Use: gray, white, or black.",
+        )
+
+    # Validate file type
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type: {file.content_type}. Please upload an image file.",
+        )
+
+    try:
+        import time
+
+        start_time = time.time()
+
+        # Read and open image
+        contents = await file.read()
+        read_time = time.time() - start_time
+        logger.info(
+            f"Processing image for segmentation: {file.filename} ({len(contents)} bytes) - read: {read_time:.3f}s"
+        )
+
+        decode_start = time.time()
+        image = Image.open(io.BytesIO(contents))
+
+        # Convert to RGB if necessary
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        decode_time = time.time() - decode_start
+        logger.info(f"Image decode and convert: {decode_time:.3f}s")
+
+        original_width, original_height = image.size
+
+        # Run segmentation
+        segment_start = time.time()
+        bg_color = BACKGROUND_COLORS[background]
+        detected, segmentation_data = segmenter.segment(
+            image, conf_threshold=confidence, bg_color=bg_color
+        )
+        segment_time = time.time() - segment_start
+        logger.info(f"YOLO segmentation: {segment_time:.3f}s")
+
+        if not detected or segmentation_data is None:
+            total_time = time.time() - start_time
+            logger.info(f"Total time (no detection): {total_time:.3f}s")
+            return SegmentationResponse(
+                success=True,
+                message="No salamander detected in the image",
+                detected=False,
+                bounding_box=None,
+                segmented_image=None,
+                original_width=original_width,
+                original_height=original_height,
+                background_color=background,
+            )
+
+        # Prepare bbox response
+        bbox = segmentation_data["bbox"]
+        bbox_data = BoundingBox(
+            x1=bbox["x1"],
+            y1=bbox["y1"],
+            x2=bbox["x2"],
+            y2=bbox["y2"],
+            confidence=segmentation_data["confidence"],
+        )
+
+        # Encode segmented image to base64
+        encode_start = time.time()
+        segmented_base64 = pil_to_base64(
+            segmentation_data["segmented_image"], format=image_format, quality=image_quality
+        )
+        encode_time = time.time() - encode_start
+        logger.info(f"Image encoding ({image_format}, quality={image_quality}): {encode_time:.3f}s")
+
+        total_time = time.time() - start_time
+        logger.info(f"Total segmentation time: {total_time:.3f}s")
+
+        return SegmentationResponse(
+            success=True,
+            message="Salamander segmented successfully",
+            detected=True,
+            bounding_box=bbox_data,
+            segmented_image=segmented_base64,
+            original_width=original_width,
+            original_height=original_height,
+            background_color=background,
+        )
+
+    except Exception as e:
+        logger.error(f"Error processing image for segmentation: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}") from e
+
+
 @app.get("/model-info")
 async def model_info():
-    """Get information about the loaded model."""
-    if detector is None:
-        return JSONResponse(status_code=503, content={"error": "Detector not initialized"})
-
+    """Get information about the loaded models."""
     return {
-        "model_loaded": detector.is_model_loaded(),
-        "model_path": str(detector.model_path),
-        "model_exists": detector.model_path.exists(),
+        "detection": {
+            "loaded": detector is not None and detector.is_model_loaded(),
+            "path": str(detector.model_path) if detector else None,
+            "exists": detector.model_path.exists() if detector else False,
+        },
+        "segmentation": {
+            "loaded": segmenter is not None and segmenter.is_model_loaded(),
+            "path": str(segmenter.model_path) if segmenter else None,
+            "exists": segmenter.model_path.exists() if segmenter else False,
+        },
     }
