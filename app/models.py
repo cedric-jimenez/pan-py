@@ -36,7 +36,9 @@ class SegmentationResponse(BaseModel):
     bounding_box: BoundingBox | None = Field(
         None, description="Bounding box of detected salamander"
     )
-    segmented_image: str | None = Field(None, description="Base64 encoded segmented image with background removed")
+    segmented_image: str | None = Field(
+        None, description="Base64 encoded segmented image with background removed"
+    )
     original_width: int = Field(..., description="Original image width")
     original_height: int = Field(..., description="Original image height")
     background_color: str = Field(..., description="Background color used (gray, white, black)")

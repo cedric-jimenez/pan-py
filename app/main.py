@@ -270,9 +270,7 @@ async def segment_salamander(
     confidence: float = Query(
         0.25, ge=0.0, le=1.0, description="Confidence threshold for detection"
     ),
-    background: str = Query(
-        "gray", description="Background color: gray, white, or black"
-    ),
+    background: str = Query("gray", description="Background color: gray, white, or black"),
     image_format: str = Query(
         "JPEG", description="Output image format (JPEG or PNG). JPEG is much faster."
     ),
@@ -379,9 +377,7 @@ async def segment_salamander(
             segmentation_data["segmented_image"], format=image_format, quality=image_quality
         )
         encode_time = time.time() - encode_start
-        logger.info(
-            f"Image encoding ({image_format}, quality={image_quality}): {encode_time:.3f}s"
-        )
+        logger.info(f"Image encoding ({image_format}, quality={image_quality}): {encode_time:.3f}s")
 
         total_time = time.time() - start_time
         logger.info(f"Total segmentation time: {total_time:.3f}s")

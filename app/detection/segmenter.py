@@ -28,7 +28,7 @@ class SalamanderSegmenter(YOLOModelBase):
             model_path=model_path,
             env_var="YOLO_SEGMENT_MODEL_PATH",
             default_path="models/segment.pt",
-            config=config
+            config=config,
         )
 
     def segment(

@@ -26,7 +26,7 @@ class SalamanderDetector(YOLOModelBase):
             model_path=model_path,
             env_var="YOLO_MODEL_PATH",
             default_path="models/crop.pt",
-            config=config
+            config=config,
         )
 
     def detect(self, image: Image.Image, conf_threshold: float = 0.25) -> tuple[bool, dict | None]:

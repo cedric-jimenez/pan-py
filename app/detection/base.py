@@ -34,7 +34,7 @@ class YOLOModelBase(ABC):  # noqa: B024
         model_path: str | None,
         env_var: str,
         default_path: str,
-        config: YOLOConfig | None = None
+        config: YOLOConfig | None = None,
     ):
         """Initialize the YOLO model.
 
