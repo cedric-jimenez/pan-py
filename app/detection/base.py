@@ -5,6 +5,7 @@ import os
 from abc import ABC
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -48,7 +49,7 @@ class YOLOModelBase(ABC):  # noqa: B024
             model_path = os.getenv(env_var, default_path)
 
         self.model_path = Path(model_path)
-        self.model = None
+        self.model: YOLO | None = None
         self.config = config if config is not None else YOLOConfig()
         self.load_model()
 
@@ -109,7 +110,7 @@ class YOLOModelBase(ABC):  # noqa: B024
         if self.model is None:
             raise RuntimeError("Model not loaded. Please ensure the model file exists.")
 
-    def _run_inference(self, image: Image.Image, conf_threshold: float):
+    def _run_inference(self, image: Image.Image, conf_threshold: float) -> Any:
         """Run YOLO inference on image.
 
         Args:
@@ -119,6 +120,8 @@ class YOLOModelBase(ABC):  # noqa: B024
         Returns:
             YOLO results object
         """
+        self._validate_model_loaded()
+        assert self.model is not None  # Type narrowing for mypy
         return self.model(image, conf=conf_threshold, verbose=self.config.verbose)
 
     def _has_detections(self, results) -> bool:
