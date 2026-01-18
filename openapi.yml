@@ -225,6 +225,63 @@ paths:
           content:
             application/json:
               schema: {}
+  /embed:
+    post:
+      summary: Embed Image
+      description: "Extract a DINOv2 embedding vector from a salamander image.\n\n\
+        The embedding can be stored in a vector database (e.g., pgvector)\nfor similarity\
+        \ search to find candidate matches.\n\nArgs:\n    file: Segmented salamander\
+        \ image (PNG with transparency recommended)\n\nReturns:\n    EmbeddingResponse\
+        \ with the normalized embedding vector (384D)"
+      operationId: embed_image_embed_post
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_embed_image_embed_post'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmbeddingResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /verify:
+    post:
+      summary: Verify Images
+      description: "Verify if a query image matches any candidate images using SIFT.\n\
+        \nThis endpoint performs detailed geometric matching using SIFT keypoints\n\
+        and RANSAC filtering. Use this after retrieving candidates from a\nvector\
+        \ database to confirm matches.\n\nArgs:\n    query: The query image (new salamander\
+        \ observation)\n    candidates: List of candidate images to compare against\n\
+        \nReturns:\n    VerificationResponse with results sorted by similarity score"
+      operationId: verify_images_verify_post
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_verify_images_verify_post'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     Body_crop_salamander_crop_salamander_post:
@@ -238,6 +295,17 @@ components:
       required:
       - file
       title: Body_crop_salamander_crop_salamander_post
+    Body_embed_image_embed_post:
+      properties:
+        file:
+          type: string
+          format: binary
+          title: File
+          description: Segmented salamander image
+      type: object
+      required:
+      - file
+      title: Body_embed_image_embed_post
     Body_segment_salamander_segment_salamander_post:
       properties:
         file:
@@ -249,6 +317,25 @@ components:
       required:
       - file
       title: Body_segment_salamander_segment_salamander_post
+    Body_verify_images_verify_post:
+      properties:
+        query:
+          type: string
+          format: binary
+          title: Query
+          description: Query image (the new observation)
+        candidates:
+          items:
+            type: string
+            format: binary
+          type: array
+          title: Candidates
+          description: Candidate images to compare against
+      type: object
+      required:
+      - query
+      - candidates
+      title: Body_verify_images_verify_post
     BoundingBox:
       properties:
         x1:
@@ -324,6 +411,40 @@ components:
       - original_height
       title: DetectionResponse
       description: Response model for salamander detection.
+    EmbeddingResponse:
+      properties:
+        success:
+          type: boolean
+          title: Success
+          description: Whether extraction was successful
+        message:
+          type: string
+          title: Message
+          description: Status message
+        embedding:
+          anyOf:
+          - items:
+              type: number
+            type: array
+          - type: 'null'
+          title: Embedding
+          description: Normalized embedding vector
+        embedding_dim:
+          type: integer
+          title: Embedding Dim
+          description: Embedding dimension
+        model:
+          type: string
+          title: Model
+          description: Model used for extraction
+      type: object
+      required:
+      - success
+      - message
+      - embedding_dim
+      - model
+      title: EmbeddingResponse
+      description: Response model for embedding extraction.
     HTTPValidationError:
       properties:
         detail:
@@ -347,6 +468,11 @@ components:
           type: boolean
           title: Segment Loaded
           description: Whether segmentation model is loaded
+          default: false
+        embedder_loaded:
+          type: boolean
+          title: Embedder Loaded
+          description: Whether DINOv2 embedder is loaded
           default: false
         version:
           type: string
@@ -427,6 +553,64 @@ components:
       - msg
       - type
       title: ValidationError
+    VerificationResponse:
+      properties:
+        success:
+          type: boolean
+          title: Success
+          description: Whether verification was successful
+        message:
+          type: string
+          title: Message
+          description: Status message
+        results:
+          items:
+            $ref: '#/components/schemas/VerificationResult'
+          type: array
+          title: Results
+          description: Verification results sorted by score
+      type: object
+      required:
+      - success
+      - message
+      title: VerificationResponse
+      description: Response model for SIFT verification.
+    VerificationResult:
+      properties:
+        candidate_index:
+          type: integer
+          title: Candidate Index
+          description: Index of the candidate image
+        is_same:
+          type: boolean
+          title: Is Same
+          description: Whether likely the same individual
+        score:
+          type: number
+          title: Score
+          description: Similarity score
+        confidence:
+          type: string
+          title: Confidence
+          description: 'Confidence level: low, medium, high'
+        matches:
+          type: integer
+          title: Matches
+          description: Number of raw SIFT matches
+        inliers:
+          type: integer
+          title: Inliers
+          description: Number of RANSAC inliers
+      type: object
+      required:
+      - candidate_index
+      - is_same
+      - score
+      - confidence
+      - matches
+      - inliers
+      title: VerificationResult
+      description: Result of a single verification.
 servers:
 - url: http://localhost:8000
   description: Serveur de développement local
