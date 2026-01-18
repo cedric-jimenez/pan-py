@@ -13,7 +13,16 @@ from pythonjsonlogger import jsonlogger
 
 from app import __version__
 from app.detection import SalamanderDetector, SalamanderSegmenter
-from app.models import BoundingBox, DetectionResponse, HealthResponse, SegmentationResponse
+from app.identification import SalamanderEmbedder, SalamanderVerifier
+from app.models import (
+    BoundingBox,
+    DetectionResponse,
+    EmbeddingResponse,
+    HealthResponse,
+    SegmentationResponse,
+    VerificationResponse,
+    VerificationResult,
+)
 from app.utils import pil_to_base64
 
 # Configure JSON logging for Railway
@@ -30,20 +39,28 @@ root_logger.addHandler(log_handler)
 
 logger = logging.getLogger(__name__)
 
-# Global detector and segmenter instances
+# Global instances
 detector: SalamanderDetector | None = None
 segmenter: SalamanderSegmenter | None = None
+embedder: SalamanderEmbedder | None = None
+verifier: SalamanderVerifier | None = None
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Initialize and cleanup resources."""
-    global detector, segmenter
+    global detector, segmenter, embedder, verifier
     # Startup: Load the YOLO models
     logger.info("Loading YOLO detection model...")
     detector = SalamanderDetector()
     logger.info("Loading YOLO segmentation model...")
     segmenter = SalamanderSegmenter()
+    # Load identification models
+    logger.info("Loading DINOv2 embedder...")
+    embedder = SalamanderEmbedder()
+    embedder.load_model()
+    logger.info("Initializing SIFT verifier...")
+    verifier = SalamanderVerifier()
     yield
     # Shutdown: cleanup if needed
     logger.info("Shutting down...")
@@ -74,6 +91,7 @@ async def root():
         status="healthy",
         yolo_loaded=detector is not None and detector.is_model_loaded(),
         segment_loaded=segmenter is not None and segmenter.is_model_loaded(),
+        embedder_loaded=embedder is not None and embedder.is_model_loaded(),
         version=__version__,
     )
 
@@ -85,6 +103,7 @@ async def health_check():
         status="healthy",
         yolo_loaded=detector is not None and detector.is_model_loaded(),
         segment_loaded=segmenter is not None and segmenter.is_model_loaded(),
+        embedder_loaded=embedder is not None and embedder.is_model_loaded(),
         version=__version__,
     )
 
@@ -412,4 +431,164 @@ async def model_info():
             "path": str(segmenter.model_path) if segmenter else None,
             "exists": segmenter.model_path.exists() if segmenter else False,
         },
+        "embedder": {
+            "loaded": embedder is not None and embedder.is_model_loaded(),
+            "model": embedder.model_name if embedder else None,
+            "embedding_dim": embedder.embedding_dim if embedder else None,
+        },
     }
+
+
+@app.post("/embed", response_model=EmbeddingResponse)
+async def embed_image(
+    file: UploadFile = File(..., description="Segmented salamander image"),
+):
+    """
+    Extract a DINOv2 embedding vector from a salamander image.
+
+    The embedding can be stored in a vector database (e.g., pgvector)
+    for similarity search to find candidate matches.
+
+    Args:
+        file: Segmented salamander image (PNG with transparency recommended)
+
+    Returns:
+        EmbeddingResponse with the normalized embedding vector (384D)
+    """
+    if embedder is None or not embedder.is_model_loaded():
+        raise HTTPException(
+            status_code=503,
+            detail="Embedder not loaded. DINOv2 model is not available.",
+        )
+
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type: {file.content_type}. Please upload an image file.",
+        )
+
+    try:
+        import time
+
+        start_time = time.time()
+
+        # Read and open image
+        contents = await file.read()
+        image = Image.open(io.BytesIO(contents))
+
+        # Extract embedding
+        embed_start = time.time()
+        embedding = embedder.embed(image)
+        embed_time = time.time() - embed_start
+
+        total_time = time.time() - start_time
+        logger.info(
+            f"Embedding extracted: {file.filename} - "
+            f"dim={len(embedding)}, embed={embed_time:.3f}s, total={total_time:.3f}s"
+        )
+
+        return EmbeddingResponse(
+            success=True,
+            message="Embedding extracted successfully",
+            embedding=embedding.tolist(),
+            embedding_dim=len(embedding),
+            model=embedder.model_name,
+        )
+
+    except Exception as e:
+        logger.error(f"Error extracting embedding: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error extracting embedding: {str(e)}") from e
+
+
+@app.post("/verify", response_model=VerificationResponse)
+async def verify_images(
+    query: UploadFile = File(..., description="Query image (the new observation)"),
+    candidates: list[UploadFile] = File(..., description="Candidate images to compare against"),
+):
+    """
+    Verify if a query image matches any candidate images using SIFT.
+
+    This endpoint performs detailed geometric matching using SIFT keypoints
+    and RANSAC filtering. Use this after retrieving candidates from a
+    vector database to confirm matches.
+
+    Args:
+        query: The query image (new salamander observation)
+        candidates: List of candidate images to compare against
+
+    Returns:
+        VerificationResponse with results sorted by similarity score
+    """
+    if verifier is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Verifier not initialized.",
+        )
+
+    if not query.content_type or not query.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid query file type: {query.content_type}",
+        )
+
+    if len(candidates) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one candidate image is required.",
+        )
+
+    try:
+        import time
+
+        start_time = time.time()
+
+        # Load query image
+        query_contents = await query.read()
+        query_image = Image.open(io.BytesIO(query_contents))
+
+        # Load candidate images
+        candidate_images = []
+        for cand in candidates:
+            if not cand.content_type or not cand.content_type.startswith("image/"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid candidate file type: {cand.content_type}",
+                )
+            cand_contents = await cand.read()
+            candidate_images.append(Image.open(io.BytesIO(cand_contents)))
+
+        # Run verification
+        verify_start = time.time()
+        results = verifier.verify_against_many(query_image, candidate_images)
+        verify_time = time.time() - verify_start
+
+        total_time = time.time() - start_time
+        logger.info(
+            f"Verification complete: query={query.filename}, "
+            f"candidates={len(candidates)}, verify={verify_time:.3f}s, total={total_time:.3f}s"
+        )
+
+        # Convert to response model
+        result_models = [
+            VerificationResult(
+                candidate_index=r["candidate_index"],
+                is_same=r["is_same"],
+                score=r["score"],
+                confidence=r["confidence"],
+                matches=r["matches"],
+                inliers=r["inliers"],
+            )
+            for r in results
+        ]
+
+        return VerificationResponse(
+            success=True,
+            message=f"Verified against {len(candidates)} candidates",
+            results=result_models,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during verification: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error during verification: {str(e)}") from e
