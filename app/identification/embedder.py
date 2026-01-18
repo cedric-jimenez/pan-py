@@ -1,6 +1,7 @@
 """DINOv2 embedder for salamander identification."""
 
 import logging
+import warnings
 
 import numpy as np
 import torch
@@ -36,6 +37,14 @@ class SalamanderEmbedder:
             return
 
         logger.info(f"Loading DINOv2 model: {self.model_name}")
+
+        # Suppress xFormers warning - xFormers is not needed for CPU-only inference
+        warnings.filterwarnings(
+            "ignore",
+            message="xFormers is not available",
+            category=UserWarning,
+        )
+
         self.model = torch.hub.load(
             "facebookresearch/dinov2",
             self.model_name,
