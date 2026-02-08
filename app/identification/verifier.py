@@ -1,21 +1,25 @@
-"""SIFT-based verifier for salamander identification."""
+"""DINOv2-based verifier for salamander identification.
+
+Uses cosine similarity on DINOv2 embeddings instead of SIFT keypoint matching.
+This approach is more robust for deformable objects like salamanders and
+leverages color/pattern information that SIFT (grayscale-only) would miss.
+"""
 
 import logging
 from typing import TypedDict
 
-import cv2
 import numpy as np
-from cv2 import KeyPoint
 from PIL import Image
+
+from app.identification.embedder import SalamanderEmbedder
 
 logger = logging.getLogger(__name__)
 
 
-# SIFT configuration
-DEFAULT_N_FEATURES = 1000
-DEFAULT_RATIO_THRESH = 0.75
-DEFAULT_RANSAC_THRESH = 5.0
-MIN_MATCHES_FOR_RANSAC = 4
+# Default cosine similarity thresholds
+DEFAULT_HIGH_THRESHOLD = 0.70
+DEFAULT_MEDIUM_THRESHOLD = 0.50
+DEFAULT_LOW_THRESHOLD = 0.40
 
 
 class VerificationResult(TypedDict):
@@ -23,155 +27,58 @@ class VerificationResult(TypedDict):
     is_same: bool
     score: float
     confidence: str
+    cosine_similarity: float
     matches: int
     inliers: int
-    keypoints_query: int
-    keypoints_candidate: int
 
 
 class SalamanderVerifier:
-    """Verifies if two salamander images are the same individual using SIFT.
+    """Verifies if two salamander images are the same individual.
 
-    SIFT detects local keypoints and matches them between images.
-    RANSAC filters geometrically inconsistent matches.
+    Uses DINOv2 embeddings and cosine similarity for robust matching
+    that handles deformable objects and preserves color information.
     """
 
     def __init__(
         self,
-        n_features: int = DEFAULT_N_FEATURES,
-        ratio_thresh: float = DEFAULT_RATIO_THRESH,
-        ransac_thresh: float = DEFAULT_RANSAC_THRESH,
+        embedder: SalamanderEmbedder,
+        high_threshold: float = DEFAULT_HIGH_THRESHOLD,
+        medium_threshold: float = DEFAULT_MEDIUM_THRESHOLD,
+        low_threshold: float = DEFAULT_LOW_THRESHOLD,
     ) -> None:
         """Initialize the verifier.
 
         Args:
-            n_features: Maximum number of SIFT keypoints per image.
-            ratio_thresh: Lowe's ratio test threshold.
-            ransac_thresh: RANSAC reprojection threshold in pixels.
+            embedder: A loaded SalamanderEmbedder instance.
+            high_threshold: Cosine similarity above this → is_same=True, confidence=high.
+            medium_threshold: Cosine similarity above this → is_same=True, confidence=medium.
+            low_threshold: Cosine similarity above this → is_same=False, confidence=low.
+                           Below this → is_same=False, confidence=high.
         """
-        self.n_features = n_features
-        self.ratio_thresh = ratio_thresh
-        self.ransac_thresh = ransac_thresh
-        self.sift = cv2.SIFT_create(nfeatures=n_features)  # type: ignore[attr-defined]
+        self.embedder = embedder
+        self.high_threshold = high_threshold
+        self.medium_threshold = medium_threshold
+        self.low_threshold = low_threshold
 
-    def _pil_to_gray(self, image: Image.Image) -> np.ndarray:
-        """Convert PIL Image to grayscale numpy array.
-
-        Handles RGBA by compositing on black background.
+    def _classify(self, cosine_sim: float) -> tuple[bool, str, float]:
+        """Classify a cosine similarity score into a decision.
 
         Args:
-            image: PIL Image.
+            cosine_sim: Cosine similarity value (-1 to 1).
 
         Returns:
-            Grayscale numpy array.
+            Tuple of (is_same, confidence, score).
+            score is cosine_sim clamped to [0, 1].
         """
-        if image.mode == "RGBA":
-            bg = Image.new("RGB", image.size, (0, 0, 0))
-            bg.paste(image, mask=image.split()[3])
-            image = bg
-        return np.array(image.convert("L"))
+        score = float(max(0.0, min(1.0, cosine_sim)))
 
-    def _extract_features(
-        self,
-        image: Image.Image,
-    ) -> tuple[list, np.ndarray | None]:
-        """Extract SIFT keypoints and descriptors.
-
-        Args:
-            image: PIL Image.
-
-        Returns:
-            Tuple (keypoints, descriptors).
-        """
-        gray = self._pil_to_gray(image)
-        keypoints, descriptors = self.sift.detectAndCompute(gray, None)
-        return keypoints, descriptors
-
-    def _match_descriptors(
-        self,
-        desc1: np.ndarray | None,
-        desc2: np.ndarray | None,
-    ) -> list[cv2.DMatch]:
-        """Match descriptors using FLANN with Lowe's ratio test.
-
-        Args:
-            desc1: Descriptors from image 1.
-            desc2: Descriptors from image 2.
-
-        Returns:
-            List of good matches.
-        """
-        if desc1 is None or desc2 is None or len(desc1) == 0 or len(desc2) == 0:
-            return []
-
-        # FLANN matcher
-        index_params: dict[str, bool | int | float | str] = {
-            "algorithm": 1,
-            "trees": 5,
-        }
-        search_params: dict[str, bool | int | float | str] = {
-            "checks": 50,
-        }
-
-        try:
-            flann = cv2.FlannBasedMatcher(index_params, search_params)
-            matches = flann.knnMatch(desc1, desc2, k=2)
-        except cv2.error:
-            # Fallback to BruteForce
-            bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
-            matches = bf.knnMatch(desc1, desc2, k=2)
-
-        # Lowe's ratio test
-        good_matches = []
-        for match in matches:
-            if len(match) == 2:
-                m, n = match
-                if m.distance < self.ratio_thresh * n.distance:
-                    good_matches.append(m)
-
-        return good_matches
-
-    def _filter_ransac(
-        self,
-        kp1: list[KeyPoint],
-        kp2: list[KeyPoint],
-        matches: list[cv2.DMatch],
-    ) -> tuple[list[cv2.DMatch], int]:
-        """Filter matches using RANSAC.
-
-        Args:
-            kp1: Keypoints from image 1.
-            kp2: Keypoints from image 2.
-            matches: Raw matches.
-
-        Returns:
-            Tuple (filtered matches, number of inliers).
-        """
-        if len(matches) < MIN_MATCHES_FOR_RANSAC:
-            return matches, len(matches)
-
-        pts1 = np.array(
-            [kp1[m.queryIdx].pt for m in matches],
-            dtype=np.float32,
-        ).reshape(-1, 1, 2)
-
-        pts2 = np.array(
-            [kp2[m.trainIdx].pt for m in matches],
-            dtype=np.float32,
-        ).reshape(-1, 1, 2)
-
-        try:
-            _, mask = cv2.findHomography(pts1, pts2, cv2.RANSAC, self.ransac_thresh)
-        except cv2.error:
-            return matches, len(matches)
-
-        if mask is None:
-            return matches, len(matches)
-
-        mask = mask.ravel().astype(bool)
-        inliers = [m for m, is_inlier in zip(matches, mask, strict=True) if is_inlier]
-
-        return inliers, len(inliers)
+        if cosine_sim >= self.high_threshold:
+            return True, "high", score
+        if cosine_sim >= self.medium_threshold:
+            return True, "medium", score
+        if cosine_sim >= self.low_threshold:
+            return False, "low", score
+        return False, "high", score
 
     def verify(
         self,
@@ -185,59 +92,21 @@ class SalamanderVerifier:
             image2: Second PIL Image.
 
         Returns:
-            Dictionary with verification results:
-                - is_same: Boolean indicating if same individual
-                - score: Similarity score (0-1)
-                - confidence: Confidence level (low/medium/high)
-                - matches: Number of raw matches
-                - inliers: Number of RANSAC inliers
-                - keypoints1: Number of keypoints in image 1
-                - keypoints2: Number of keypoints in image 2
+            Dictionary with verification results.
         """
-        # Extract features
-        kp1, desc1 = self._extract_features(image1)
-        kp2, desc2 = self._extract_features(image2)
+        emb1 = self.embedder.embed(image1)
+        emb2 = self.embedder.embed(image2)
 
-        n_kp1 = len(kp1) if kp1 else 0
-        n_kp2 = len(kp2) if kp2 else 0
-
-        # Match
-        matches = self._match_descriptors(desc1, desc2)
-        n_matches = len(matches)
-
-        # RANSAC
-        inliers, n_inliers = self._filter_ransac(kp1, kp2, matches)
-
-        # Compute score
-        if n_kp1 == 0 or n_kp2 == 0:
-            score = 0.0
-        else:
-            match_ratio = n_matches / np.sqrt(n_kp1 * n_kp2)
-            inlier_ratio = n_inliers / n_matches if n_matches > 0 else 0.0
-            score = match_ratio * (0.5 + 0.5 * inlier_ratio)
-
-        # Determine result
-        if score >= 0.10:
-            is_same = True
-            confidence = "high"
-        elif score >= 0.05:
-            is_same = True
-            confidence = "medium"
-        elif score >= 0.03:
-            is_same = False
-            confidence = "low"
-        else:
-            is_same = False
-            confidence = "high"
+        cosine_sim = float(np.dot(emb1, emb2))
+        is_same, confidence, score = self._classify(cosine_sim)
 
         return {
             "is_same": is_same,
-            "score": float(score),
+            "score": score,
             "confidence": confidence,
-            "matches": n_matches,
-            "inliers": n_inliers,
-            "keypoints1": n_kp1,
-            "keypoints2": n_kp2,
+            "cosine_similarity": cosine_sim,
+            "matches": 0,
+            "inliers": 0,
         }
 
     def verify_against_many(
@@ -247,6 +116,8 @@ class SalamanderVerifier:
     ) -> list[VerificationResult]:
         """Verify a query image against multiple candidates.
 
+        Embeds the query once, then compares against each candidate.
+
         Args:
             query_image: Query PIL Image.
             candidate_images: List of candidate PIL Images.
@@ -254,57 +125,32 @@ class SalamanderVerifier:
         Returns:
             List of verification results, sorted by score descending.
         """
-        # Extract query features once
-        kp_query, desc_query = self._extract_features(query_image)
-        n_kp_query = len(kp_query) if kp_query else 0
+        query_emb = self.embedder.embed(query_image)
+
+        if candidate_images:
+            candidate_embs = self.embedder.embed_batch(candidate_images)
+        else:
+            return []
+
+        # Cosine similarities (embeddings are already L2-normalized)
+        similarities = candidate_embs @ query_emb
 
         results: list[VerificationResult] = []
-        for idx, candidate in enumerate(candidate_images):
-            kp_cand, desc_cand = self._extract_features(candidate)
-            n_kp_cand = len(kp_cand) if kp_cand else 0
-
-            # Match
-            matches = self._match_descriptors(desc_query, desc_cand)
-            n_matches = len(matches)
-
-            # RANSAC
-            _, n_inliers = self._filter_ransac(kp_query, kp_cand, matches)
-
-            # Score
-            if n_kp_query == 0 or n_kp_cand == 0:
-                score = 0.0
-            else:
-                match_ratio = n_matches / np.sqrt(n_kp_query * n_kp_cand)
-                inlier_ratio = n_inliers / n_matches if n_matches > 0 else 0.0
-                score = match_ratio * (0.5 + 0.5 * inlier_ratio)
-
-            # Determine result
-            if score >= 0.10:
-                is_same = True
-                confidence = "high"
-            elif score >= 0.05:
-                is_same = True
-                confidence = "medium"
-            elif score >= 0.03:
-                is_same = False
-                confidence = "low"
-            else:
-                is_same = False
-                confidence = "high"
+        for idx, cosine_sim in enumerate(similarities):
+            cosine_sim = float(cosine_sim)
+            is_same, confidence, score = self._classify(cosine_sim)
 
             results.append(
                 {
                     "candidate_index": idx,
                     "is_same": is_same,
-                    "score": float(score),
+                    "score": score,
                     "confidence": confidence,
-                    "matches": n_matches,
-                    "inliers": n_inliers,
-                    "keypoints_query": n_kp_query,
-                    "keypoints_candidate": n_kp_cand,
+                    "cosine_similarity": cosine_sim,
+                    "matches": 0,
+                    "inliers": 0,
                 }
             )
 
-        # Sort by score descending
         results.sort(key=lambda x: x["score"], reverse=True)
         return results
