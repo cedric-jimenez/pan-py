@@ -69,10 +69,13 @@ class VerificationResult(BaseModel):
 
     candidate_index: int = Field(..., description="Index of the candidate image")
     is_same: bool = Field(..., description="Whether likely the same individual")
-    score: float = Field(..., description="Similarity score")
+    score: float = Field(..., description="Similarity score (0-1)")
     confidence: str = Field(..., description="Confidence level: low, medium, high")
-    matches: int = Field(..., description="Number of raw SIFT matches")
-    inliers: int = Field(..., description="Number of RANSAC inliers")
+    cosine_similarity: float = Field(
+        0.0, description="Cosine similarity between DINOv2 embeddings (-1 to 1)"
+    )
+    matches: int = Field(0, description="Number of raw SIFT matches (deprecated, always 0)")
+    inliers: int = Field(0, description="Number of RANSAC inliers (deprecated, always 0)")
 
 
 class VerificationResponse(BaseModel):

@@ -7,8 +7,32 @@ import numpy as np
 import torch
 from PIL import Image
 from torchvision import transforms
+from torchvision.transforms import functional as F
 
 logger = logging.getLogger(__name__)
+
+
+class _ResizePad:
+    """Resize longest side to target size, pad shorter side to square.
+
+    Preserves the full salamander pattern instead of cropping.
+    """
+
+    def __init__(self, size: int, fill: tuple[int, int, int] = (0, 0, 0)) -> None:
+        self.size = size
+        self.fill = fill
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        w, h = image.size
+        scale = self.size / max(w, h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        image = F.resize(image, [new_h, new_w])
+
+        pad_left = (self.size - new_w) // 2
+        pad_top = (self.size - new_h) // 2
+        pad_right = self.size - new_w - pad_left
+        pad_bottom = self.size - new_h - pad_top
+        return F.pad(image, [pad_left, pad_top, pad_right, pad_bottom], fill=self.fill)
 
 
 class SalamanderEmbedder:
@@ -54,8 +78,7 @@ class SalamanderEmbedder:
 
         self.transform = transforms.Compose(
             [
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
+                _ResizePad(224),
                 transforms.ToTensor(),
                 transforms.Normalize(
                     mean=[0.485, 0.456, 0.406],

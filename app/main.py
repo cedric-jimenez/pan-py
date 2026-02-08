@@ -59,8 +59,8 @@ async def lifespan(_app: FastAPI):
     logger.info("Loading DINOv2 embedder...")
     embedder = SalamanderEmbedder()
     embedder.load_model()
-    logger.info("Initializing SIFT verifier...")
-    verifier = SalamanderVerifier()
+    logger.info("Initializing DINOv2 verifier...")
+    verifier = SalamanderVerifier(embedder=embedder)
     yield
     # Shutdown: cleanup if needed
     logger.info("Shutting down...")
@@ -575,6 +575,7 @@ async def verify_images(
                 is_same=r["is_same"],
                 score=r["score"],
                 confidence=r["confidence"],
+                cosine_similarity=r["cosine_similarity"],
                 matches=r["matches"],
                 inliers=r["inliers"],
             )
