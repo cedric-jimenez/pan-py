@@ -1,4 +1,9 @@
-"""DINOv2 embedder for salamander identification."""
+"""DINOv2 embedder for salamander identification.
+
+Uses GeM-pooled patch tokens instead of the CLS token to produce
+embeddings that capture local pattern details (spot arrangement)
+rather than just species-level features.
+"""
 
 import logging
 import warnings
@@ -10,6 +15,9 @@ from torchvision import transforms
 from torchvision.transforms import functional as F
 
 logger = logging.getLogger(__name__)
+
+# GeM pooling exponent — higher values emphasize distinctive patches
+GEM_EXPONENT = 3.0
 
 
 class _ResizePad:
@@ -38,8 +46,10 @@ class _ResizePad:
 class SalamanderEmbedder:
     """Extracts DINOv2 embeddings from salamander images.
 
-    DINOv2 produces a single vector per image that can be stored in
-    a vector database (e.g., pgvector) for similarity search.
+    Uses GeM-pooled patch tokens for individual-level discrimination.
+    The CLS token captures species-level similarity (all fire salamanders
+    score ~0.92), while patch tokens preserve local pattern details
+    needed to distinguish individuals by their unique spot arrangement.
     """
 
     def __init__(self, model_name: str = "dinov2_vits14") -> None:
@@ -112,8 +122,73 @@ class SalamanderEmbedder:
             return bg
         return image.convert("RGB")
 
+    @staticmethod
+    def _gem_pool(patch_tokens: torch.Tensor, p: float = GEM_EXPONENT) -> torch.Tensor:
+        """Generalized Mean Pooling on patch tokens.
+
+        More discriminative than average pooling — emphasizes
+        distinctive patches over common background patches.
+
+        Args:
+            patch_tokens: Tensor of shape (B, N_patches, D).
+            p: Exponent. Higher = closer to max pooling.
+
+        Returns:
+            Pooled tensor of shape (B, D).
+        """
+        return patch_tokens.clamp(min=1e-6).pow(p).mean(dim=1).pow(1.0 / p)
+
+    def _forward_features(self, tensor: torch.Tensor) -> dict:
+        """Run DINOv2 forward pass returning all features.
+
+        Args:
+            tensor: Input tensor of shape (B, 3, 224, 224).
+
+        Returns:
+            Dict with 'x_norm_clstoken' and 'x_norm_patchtokens'.
+        """
+        with torch.no_grad():
+            return self.model.forward_features(tensor)
+
+    def extract_features(self, image: Image.Image) -> tuple[np.ndarray, np.ndarray]:
+        """Extract both global embedding and patch tokens in a single pass.
+
+        Args:
+            image: PIL Image (RGB or RGBA).
+
+        Returns:
+            Tuple of (embedding, patch_tokens):
+                - embedding: L2-normalized GeM-pooled vector (D,)
+                - patch_tokens: L2-normalized patch tokens (N_patches, D)
+
+        Raises:
+            RuntimeError: If model is not loaded.
+        """
+        if self.model is None or self.transform is None:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+
+        image = self._prepare_image(image)
+        tensor = self.transform(image).unsqueeze(0)
+
+        features = self._forward_features(tensor)
+        patch_tokens = features["x_norm_patchtokens"]  # (1, N, D)
+
+        # Global embedding via GeM pooling
+        embedding = self._gem_pool(patch_tokens)  # (1, D)
+        embedding_np: np.ndarray = embedding.numpy().flatten()
+        embedding_np = embedding_np / np.linalg.norm(embedding_np)
+
+        # L2-normalize each patch token for cosine similarity
+        tokens_np: np.ndarray = patch_tokens.numpy()[0]  # (N, D)
+        norms = np.linalg.norm(tokens_np, axis=1, keepdims=True)
+        tokens_np = tokens_np / np.clip(norms, 1e-6, None)
+
+        return embedding_np, tokens_np
+
     def embed(self, image: Image.Image) -> np.ndarray:
         """Extract embedding from an image.
+
+        Uses GeM-pooled patch tokens for better individual discrimination.
 
         Args:
             image: PIL Image (RGB or RGBA).
@@ -124,22 +199,8 @@ class SalamanderEmbedder:
         Raises:
             RuntimeError: If model is not loaded.
         """
-        if self.model is None or self.transform is None:
-            raise RuntimeError("Model not loaded. Call load_model() first.")
-
-        # Prepare image
-        image = self._prepare_image(image)
-        tensor = self.transform(image).unsqueeze(0)
-
-        # Extract embedding
-        with torch.no_grad():
-            embedding = self.model(tensor)
-
-        # Normalize L2
-        embedding_np: np.ndarray = embedding.numpy().flatten()
-        embedding_np = embedding_np / np.linalg.norm(embedding_np)
-
-        return embedding_np
+        embedding, _ = self.extract_features(image)
+        return embedding
 
     def embed_batch(self, images: list[Image.Image]) -> np.ndarray:
         """Extract embeddings from multiple images.
@@ -164,11 +225,11 @@ class SalamanderEmbedder:
 
         batch = torch.stack(tensors)
 
-        # Extract embeddings
-        with torch.no_grad():
-            embeddings = self.model(batch)
+        features = self._forward_features(batch)
+        patch_tokens = features["x_norm_patchtokens"]  # (B, N, D)
+        embeddings = self._gem_pool(patch_tokens)  # (B, D)
 
-        # Normalize L2
+        # L2 normalize
         embeddings_np: np.ndarray = embeddings.numpy()
         norms = np.linalg.norm(embeddings_np, axis=1, keepdims=True)
         embeddings_np = embeddings_np / norms

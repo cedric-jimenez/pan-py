@@ -2,24 +2,37 @@
 
 ## Summary
 
-The `/embed` and `/verify` endpoints have been updated to improve salamander identification accuracy. The main changes are:
+The `/embed` and `/verify` endpoints have been updated to improve individual salamander identification accuracy. The previous approach used the DINOv2 CLS token (which only captured species-level similarity — all fire salamanders scored ~0.92) and SIFT keypoint matching (grayscale-only, assumed rigid objects).
 
-1. **`/embed`**: Better image preprocessing that preserves the full salamander pattern
-2. **`/verify`**: Replaced SIFT keypoint matching with DINOv2 cosine similarity
+The new approach uses **DINOv2 patch tokens** which capture local pattern details (spot arrangement, color boundaries) that distinguish individual salamanders.
 
 Both endpoints maintain **backward compatibility** — no breaking changes to the request format or response structure.
 
 ---
 
+## What changed (algorithm)
+
+### Before
+
+| Step | Method | Problem |
+|------|--------|---------|
+| Embedding | DINOv2 CLS token + CenterCrop | CLS token captures "fire salamander" → all individuals score ~0.92. CenterCrop cuts off pattern edges. |
+| Verification | SIFT keypoints + RANSAC homography | Grayscale only (loses color), assumes rigid object (salamanders bend), ad-hoc scoring formula. |
+
+### After
+
+| Step | Method | Improvement |
+|------|--------|-------------|
+| Embedding | **GeM-pooled DINOv2 patch tokens** + resize/pad | Patch tokens encode local pattern details. GeM pooling emphasizes distinctive patches. Resize+pad preserves full pattern. |
+| Verification | **Patch-level mutual nearest neighbor matching** | Compares ~256 local patches between images. Only mutual best matches count, filtering out ambiguous correspondences. Color-aware. |
+
+---
+
 ## `/embed` Endpoint
-
-### What changed
-
-The internal image preprocessing now uses **resize + pad** instead of center-crop. This preserves the full salamander pattern regardless of image aspect ratio, producing more accurate embeddings.
 
 ### Request format
 
-**No change.** Same as before:
+**No change.**
 
 ```http
 POST /embed
@@ -44,23 +57,15 @@ file: <image file>
 
 ### Action required
 
-**Re-index existing embeddings.** The new preprocessing produces slightly different embedding values for the same image. If you have embeddings stored in a vector database (pgvector), you should re-compute all existing embeddings using the updated `/embed` endpoint to ensure consistent similarity search results.
+**Re-index all stored embeddings.** The new GeM-pooled patch token embeddings are fundamentally different from the old CLS token embeddings. You **must** re-compute all existing embeddings via the updated `/embed` endpoint. Old and new embeddings are not comparable.
 
 ---
 
 ## `/verify` Endpoint
 
-### What changed
-
-The verification engine now uses **DINOv2 cosine similarity** instead of SIFT keypoint matching. This provides:
-
-- Better accuracy on deformable objects (salamanders change posture)
-- Color/pattern-aware matching (SIFT was grayscale-only)
-- More consistent and interpretable scores
-
 ### Request format
 
-**No change.** Same as before:
+**No change.**
 
 ```http
 POST /verify
@@ -74,7 +79,7 @@ candidates: <image file 2>
 
 ### Response format
 
-The response structure is **backward compatible**. Existing fields are preserved, one new field is added:
+The response structure is **backward compatible**:
 
 ```json
 {
@@ -84,9 +89,18 @@ The response structure is **backward compatible**. Existing fields are preserved
     {
       "candidate_index": 0,
       "is_same": true,
-      "score": 0.82,
+      "score": 0.32,
       "confidence": "high",
-      "cosine_similarity": 0.82,
+      "cosine_similarity": 0.78,
+      "matches": 0,
+      "inliers": 0
+    },
+    {
+      "candidate_index": 2,
+      "is_same": false,
+      "score": 0.08,
+      "confidence": "high",
+      "cosine_similarity": 0.61,
       "matches": 0,
       "inliers": 0
     }
@@ -94,41 +108,64 @@ The response structure is **backward compatible**. Existing fields are preserved
 }
 ```
 
-#### Field changes
+### Field changes
 
 | Field | Status | Notes |
 |-------|--------|-------|
 | `candidate_index` | Unchanged | Index of the candidate image |
 | `is_same` | Unchanged | Whether likely the same individual |
-| `score` | Unchanged | Similarity score (0-1), now based on cosine similarity |
+| `score` | **Changed scale** | Now based on patch matching (0-1). Typical same-individual: 0.25-0.45. Typical different: 0.05-0.15. |
 | `confidence` | Unchanged | `"low"`, `"medium"`, or `"high"` |
-| `cosine_similarity` | **New** | Raw cosine similarity between DINOv2 embeddings (-1 to 1) |
-| `matches` | Deprecated | Always `0` — was SIFT-specific, kept for backward compat |
-| `inliers` | Deprecated | Always `0` — was SIFT-specific, kept for backward compat |
+| `cosine_similarity` | Unchanged | Global embedding cosine similarity (for reference) |
+| `matches` | Deprecated | Always `0` — SIFT-specific, kept for backward compat |
+| `inliers` | Deprecated | Always `0` — SIFT-specific, kept for backward compat |
 
-### New thresholds
+### New score scale
 
-The decision thresholds are now based on cosine similarity:
+**Important:** The `score` field now uses a completely different scale. Previously scores were clustered around 0.91-0.94 for all same-species individuals. Now scores are much more spread out:
 
-| Cosine Similarity | `is_same` | `confidence` |
-|-------------------|-----------|--------------|
-| >= 0.70 | `true` | `"high"` |
-| >= 0.50 | `true` | `"medium"` |
-| >= 0.40 | `false` | `"low"` |
-| < 0.40 | `false` | `"high"` |
+| Patch Score | `is_same` | `confidence` | Interpretation |
+|-------------|-----------|--------------|----------------|
+| >= 0.25 | `true` | `"high"` | Strong pattern match — very likely same individual |
+| >= 0.15 | `true` | `"medium"` | Moderate match — possible same individual, different pose |
+| >= 0.10 | `false` | `"low"` | Weak match — uncertain, review manually |
+| < 0.10 | `false` | `"high"` | No match — confidently different individuals |
 
-### Action required for frontend
+### What `score` means now
 
-1. **Start using `cosine_similarity`** instead of `matches`/`inliers` for any display or logic. These two fields will be removed in a future version.
-2. **`score` values will differ** from previous versions — the scale and distribution have changed. If you have hardcoded thresholds on the frontend (e.g., showing a warning below 0.05), update them to match the new scale (0-1 range based on cosine similarity).
-3. **`is_same` and `confidence` work the same way** — you can continue using them as-is for UI decisions.
+The score is computed as: `(mutual_match_ratio) × (mean_similarity_of_matches)`
+
+- **Mutual match ratio**: proportion of patches (out of ~256) that are mutual best matches between the two images. Same individual → many mutual matches. Different individual → few.
+- **Mean similarity**: average cosine similarity of those mutual matches. Same individual → high similarity. Different → lower.
+
+---
+
+## Action required for frontend
+
+### Must do
+
+1. **Re-compute all stored embeddings** via `/embed` — old embeddings are incompatible
+2. **Update any hardcoded score thresholds** — the score scale changed dramatically:
+   - Old: all same-species individuals scored 0.91-0.94
+   - New: same individual ~0.25-0.45, different individual ~0.05-0.15
+3. **Update score display** — if you show the score as a percentage, the raw values are now lower but more meaningful
+
+### Should do
+
+4. **Use `score` (patch matching) as the primary sorting/display metric** — it's the most discriminative
+5. **Use `cosine_similarity` as a secondary metric** — useful for quick pre-filtering but less precise
+6. **Stop using `matches` and `inliers`** — always 0, will be removed in a future version
+
+### Optional
+
+7. **Show `cosine_similarity` alongside `score`** for debugging — helps understand edge cases
 
 ---
 
 ## Quick checklist
 
 - [ ] Re-compute all stored embeddings via `/embed`
-- [ ] Replace any usage of `matches` / `inliers` with `cosine_similarity`
-- [ ] Update any hardcoded score thresholds to the new cosine similarity scale
-- [ ] Verify UI displays work correctly with the new score range (0-1)
-- [ ] Remove references to SIFT in any user-facing text
+- [ ] Update hardcoded score thresholds to new scale (0.25/0.15/0.10)
+- [ ] Update score display formatting (no longer 0.90+ range)
+- [ ] Verify UI displays work correctly with the new score range
+- [ ] Remove dependencies on `matches` / `inliers` fields
