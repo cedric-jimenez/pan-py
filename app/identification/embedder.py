@@ -150,16 +150,60 @@ class SalamanderEmbedder:
         with torch.no_grad():
             return self.model.forward_features(tensor)
 
-    def extract_features(self, image: Image.Image) -> tuple[np.ndarray, np.ndarray]:
+    @staticmethod
+    def _compute_content_ratio(w: int, h: int, size: int = 224, patch_size: int = 14) -> np.ndarray:
+        """Compute per-patch content ratio from original image dimensions.
+
+        After _ResizePad, some patches cover padding (black fill) rather than
+        actual image content.  This method returns the fraction of each patch
+        that overlaps with the real content area, enabling downstream padding
+        filtering.
+
+        Args:
+            w: Original image width (after RGB conversion, before resize).
+            h: Original image height.
+            size: Target square size (224 for DINOv2).
+            patch_size: ViT patch size in pixels (14 for DINOv2).
+
+        Returns:
+            Array of shape (n_patches,) with values in [0, 1].
+            1.0 = fully content, 0.0 = fully padding.
+        """
+        scale = size / max(w, h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        pad_left = (size - new_w) // 2
+        pad_top = (size - new_h) // 2
+
+        grid = size // patch_size  # 16
+        n_patches = grid * grid
+
+        content_ratio = np.empty(n_patches, dtype=np.float64)
+        for r in range(grid):
+            py0, py1 = r * patch_size, (r + 1) * patch_size
+            for c in range(grid):
+                px0, px1 = c * patch_size, (c + 1) * patch_size
+                # Overlap with content rectangle
+                oy = max(0, min(py1, pad_top + new_h) - max(py0, pad_top))
+                ox = max(0, min(px1, pad_left + new_w) - max(px0, pad_left))
+                content_ratio[r * grid + c] = (oy * ox) / (patch_size * patch_size)
+
+        return content_ratio
+
+    def extract_features(
+        self, image: Image.Image
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Extract both global embedding and patch tokens in a single pass.
 
         Args:
             image: PIL Image (RGB or RGBA).
 
         Returns:
-            Tuple of (embedding, patch_tokens):
+            Tuple of (embedding, patch_tokens, patch_content_ratio):
                 - embedding: L2-normalized GeM-pooled vector (D,)
                 - patch_tokens: L2-normalized patch tokens (N_patches, D)
+                - patch_content_ratio: Per-patch content ratio (N_patches,).
+                  1.0 = fully content, 0.0 = fully padding.  Used by the
+                  verifier to filter out padding patches.
 
         Raises:
             RuntimeError: If model is not loaded.
@@ -168,6 +212,11 @@ class SalamanderEmbedder:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
         image = self._prepare_image(image)
+
+        # Compute geometric content ratio before transform (which applies padding)
+        w, h = image.size
+        content_ratio = self._compute_content_ratio(w, h)
+
         tensor = self.transform(image).unsqueeze(0)
 
         features = self._forward_features(tensor)
@@ -183,7 +232,7 @@ class SalamanderEmbedder:
         norms = np.linalg.norm(tokens_np, axis=1, keepdims=True)
         tokens_np = tokens_np / np.clip(norms, 1e-6, None)
 
-        return embedding_np, tokens_np
+        return embedding_np, tokens_np, content_ratio
 
     def embed(self, image: Image.Image) -> np.ndarray:
         """Extract embedding from an image.
@@ -199,7 +248,7 @@ class SalamanderEmbedder:
         Raises:
             RuntimeError: If model is not loaded.
         """
-        embedding, _ = self.extract_features(image)
+        embedding, _, _ = self.extract_features(image)
         return embedding
 
     def embed_batch(self, images: list[Image.Image]) -> np.ndarray:

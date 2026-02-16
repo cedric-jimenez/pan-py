@@ -74,12 +74,12 @@ class VerificationResult(BaseModel):
     cosine_similarity: float = Field(
         0.0, description="Cosine similarity between DINOv2 embeddings (-1 to 1)"
     )
-    matches: int = Field(0, description="Number of raw SIFT matches (deprecated, always 0)")
-    inliers: int = Field(0, description="Number of RANSAC inliers (deprecated, always 0)")
+    matches: int = Field(0, description="Number of mutual nearest neighbor matches")
+    inliers: int = Field(0, description="Number of spatially consistent inlier matches")
 
 
 class VerificationResponse(BaseModel):
-    """Response model for SIFT verification."""
+    """Response model for DINOv2 patch-level verification."""
 
     success: bool = Field(..., description="Whether verification was successful")
     message: str = Field(..., description="Status message")
