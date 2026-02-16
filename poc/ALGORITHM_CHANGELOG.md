@@ -124,24 +124,126 @@ titine2       0.403   0.372   0.329   0.418   0.382   0.221   0.417   1.000
 
 ### Conclusion
 
-L'algorithme de base (v0) détecte correctement les similarités visuelles, mais:
-1. Le dataset de test a des labels incomplets (cluster IMG probable même individu)
-2. La différence de pose entre titine-1 et titine-2 impacte le score
-3. DINOv2 capture des features "salamandre" génériques, pas les spots individuels
+Le dataset est **correct**. L'algorithme v0 ne discrimine pas les individus :
+1. La différence de pose entre titine-1 et titine-2 impacte le score
+2. DINOv2 capture des features "salamandre" génériques, pas les spots individuels
+3. Le score `match_ratio × mean_similarity` ne pénalise pas les matches sémantiques non-discriminants
 
-### Pistes d'amélioration futures
+---
 
-1. **Augmenter le dataset** avec plus de paires same/different labelées
-2. **Fine-tuner DINOv2** spécifiquement pour les patterns de salamandres
-3. **Combiner avec détection de spots** explicite (segmentation des taches jaunes)
-4. **Normaliser la pose** avant comparaison
+## v2 - Proposition d'amélioration
+
+**Date**: 2026-02-16
+
+### Diagnostic du problème
+
+Le problème fondamental de v0 est que **tous les patches de salamandre se ressemblent** dans l'espace DINOv2. Un patch "patte" de l'individu A matche un patch "patte" de l'individu B avec une similarité cosinus de 0.7-0.98. Le MNN trouve donc de nombreux matches mutuels même entre individus différents, et le score `match_ratio × mean_similarity` est élevé pour tous.
+
+Ce qui distingue deux images du **même** individu vs deux individus **différents**, c'est :
+1. **La cohérence spatiale** : si le patch (3,5) matche le patch (3,6) et le patch (7,2) matche le patch (7,3), les vecteurs de déplacement sont cohérents → même individu vu sous un angle légèrement différent. Pour des individus différents, les matches MNN seront spatialement aléatoires.
+2. **Les "hub" patches** : certains patches génériques (corps noir, fond) sont les plus proches voisins de beaucoup d'autres patches. Ils créent des faux matches qui gonflent les scores.
+3. **Le padding** : les images sont redimensionnées et paddées à 224×224 avec du noir. Les patches de padding ajoutent du bruit au matching.
+
+### Améliorations proposées (par ordre de priorité)
+
+#### A1 - Filtrage des patches de padding
+
+**Problème** : `_ResizePad` ajoute du padding noir (0,0,0) pour obtenir un carré 224×224. Les patches couvrant du padding sont des vecteurs quasi-identiques qui se matchent trivialement entre toutes les images, gonflant artificiellement `match_ratio`.
+
+**Solution** : Avant le matching, retirer les patches dont la norme (avant L2-normalisation) est inférieure à un seuil. Les patches de padding ont une norme très faible car ils représentent des régions uniformément noires après normalisation ImageNet.
+
+**Impact attendu** : Faible mais nécessaire. Élimine du bruit, réduit le nombre de patches inutiles (potentiellement 30-50% selon le ratio d'aspect de l'image).
+
+**Implémentation** : Modifier `extract_features()` dans `embedder.py` pour retourner aussi un masque de validité, ou filtrer les patches dans `_patch_match_score()`.
+
+#### A2 - CSLS (Cross-domain Similarity Local Scaling)
+
+**Problème** : Certains patches sont des "hubs" — ils sont le plus proche voisin de beaucoup d'autres patches. Un patch générique "corps noir de salamandre" match bien avec tout. Le MNN filtre partiellement ce problème mais pas assez.
+
+**Solution** : Remplacer la similarité cosinus brute par CSLS :
+
+```
+CSLS(x, y) = 2·cos(x, y) - mean_kNN(x) - mean_kNN(y)
+```
+
+Où `mean_kNN(x)` = moyenne des similarités des k plus proches voisins de x dans l'autre ensemble de patches.
+
+**Principe** : Si un patch x a une similarité moyenne élevée avec beaucoup de patches (c'est un hub), sa similarité CSLS avec n'importe quel patch y sera pénalisée. Seuls les matches **spécifiques** (haute similarité entre x et y, mais x et y ne matchent pas bien avec le reste) obtiennent un score CSLS élevé.
+
+**Paramètre** : k=10 (standard dans la littérature, à valider empiriquement).
+
+**Impact attendu** : Modéré. Devrait réduire les scores des paires "different" sans trop affecter les paires "same" car les vrais matches ont une spécificité que les hubs n'ont pas.
+
+#### A3 - Score de cohérence spatiale
+
+**Problème** : C'est le problème central. Le MNN matche un patch "patte avant gauche" de l'image 1 avec un patch "patte arrière droite" de l'image 2. Le score de similarité est élevé (c'est une patte dans les deux cas), mais la position spatiale est incohérente.
+
+Pour le **même** individu : les matches MNN devraient former une transformation spatiale cohérente (translation, légère rotation, léger changement d'échelle). Le patch en haut-à-gauche de l'image 1 devrait matcher un patch en haut-à-gauche de l'image 2 (à une transformation près).
+
+Pour des individus **différents** : les matches MNN seront spatialement dispersés, les vecteurs de déplacement pointant dans toutes les directions.
+
+**Solution** : Après le MNN, calculer un score de cohérence spatiale :
+
+1. Pour chaque match mutuel (i, j), calculer le vecteur de déplacement `d = pos(j) - pos(i)` où `pos()` retourne les coordonnées (row, col) du patch dans la grille 16×16.
+2. Calculer le vecteur de déplacement médian `d_med`.
+3. Pour chaque match, calculer la distance au déplacement médian : `||d - d_med||`.
+4. Compter le nombre d'**inliers** : matches dont la distance au médian est < seuil (ex: 2 patches).
+5. **Score spatial** = `n_inliers / n_mutual_matches`.
+
+**Score final combiné** :
+```
+score = spatial_consistency × mean_similarity_of_inliers
+```
+
+Ce score remplace le `match_ratio × mean_similarity` de v0. Il ne récompense plus le nombre brut de matches, mais la **qualité géométrique** des matches.
+
+**Analogie** : C'est l'équivalent de RANSAC pour les keypoints SIFT, mais adapté à la grille régulière de patches DINOv2. La grille régulière simplifie le problème car on n'a pas besoin d'estimer une homographie complète — un simple modèle de translation suffit.
+
+**Impact attendu** : Élevé. C'est l'amélioration la plus prometteuse. Pour la paire titine-1 vs titine-2 (même individu), les matches devraient être spatialement cohérents. Pour IMG_195956 vs IMG_200016 (différents individus mais même espèce), les matches devraient être spatialement aléatoires même si les similarités patch-à-patch sont élevées.
+
+#### A4 - Pondération par distinctivité des patches (optionnel, après validation A1-A3)
+
+**Problème** : Tous les patches sont traités de la même façon. Un patch "tache jaune unique" devrait compter plus qu'un patch "corps noir uniforme".
+
+**Solution** : Pondérer chaque patch par sa distance au centroïde moyen de tous les patches de l'image. Les patches distinctifs (taches jaunes, motifs particuliers) seront plus éloignés du centroïde que les patches génériques (corps noir).
+
+**Impact attendu** : Complémentaire aux autres améliorations. Permet de ne pas diluer le signal des patches discriminants dans la masse de patches non-informatifs.
+
+### Plan d'implémentation
+
+L'ordre est important — chaque étape se base sur la précédente :
+
+| Étape | Amélioration | Fichier modifié | Complexité |
+|-------|-------------|-----------------|------------|
+| 1 | A1 - Filtrage padding | `embedder.py` (retourner normes) + `verifier.py` (filtrer) | Faible |
+| 2 | A2 - CSLS | `verifier.py` (`_patch_match_score`) | Faible |
+| 3 | A3 - Cohérence spatiale | `verifier.py` (`_patch_match_score`) | Moyenne |
+| 4 | Recalibrer les seuils | `verifier.py` (constantes) | Faible |
+| 5 | A4 - Pondération distinctivité | `verifier.py` | Faible |
+
+Chaque étape doit être évaluée sur le dataset de 28 paires avant de passer à la suivante.
+
+### Résultats attendus
+
+| Métrique | v0 (actuel) | v2 (cible) |
+|----------|-------------|------------|
+| Accuracy | 21.4% | > 85% |
+| Gap same/different | -0.326 (inversé) | > 0 (positif) |
+| Score same (titine) | 0.417 | Le plus haut ou parmi les plus hauts |
+| Score different max | 0.743 | < score same |
+
+### Risques et limites
+
+1. **Pose extrême** : Si deux photos du même individu sont prises de côtés opposés (ventre vs dos), la cohérence spatiale sera faible. Mitigation : la v2 sera meilleure que v0 dans tous les cas, et la normalisation de pose reste une piste future.
+2. **Grille fixe 16×16** : La résolution de la grille de patches limite la précision spatiale. Un décalage d'un patch = 14 pixels. Pour des petites salamandres dans l'image, ça peut être significatif.
+3. **Seuils k et distance** : Les paramètres de CSLS (k) et de cohérence spatiale (seuil inlier) devront être ajustés empiriquement sur le dataset.
 
 ---
 
 ## Statut actuel
 
-- **Algorithme en production**: v0 (mutual nearest neighbor)
-- **Performance sur dataset actuel**: 21.4% accuracy (mais dataset suspect)
-- **Performance estimée sur données propres**: À déterminer avec meilleur ground truth
+- **Algorithme en production** : v0 (mutual nearest neighbor)
+- **Performance** : 21.4% accuracy — le dataset est correct, l'algorithme ne discrimine pas
+- **Prochaine étape** : Implémenter v2 (A1 → A2 → A3 → recalibrage seuils)
 
 ---
