@@ -240,10 +240,86 @@ Chaque étape doit être évaluée sur le dataset de 28 paires avant de passer �
 
 ---
 
+## v2 - Résultats d'implémentation
+
+**Date** : 2026-02-16
+
+### Implémentation effective
+
+Les trois améliorations A1, A2, A3 ont été implémentées. L'implémentation de A1 a dû être adaptée par rapport au plan initial :
+
+**A1 — Filtrage padding (adapté)** : Le plan prévoyait d'utiliser les normes L2 des patch tokens avant normalisation pour distinguer padding/contenu. En pratique, le `LayerNorm` interne de DINOv2 égalise toutes les normes (~45-56), rendant cette approche inopérante. Remplacé par un **masque géométrique** calculé depuis les dimensions de l'image et le padding déterministe de `_ResizePad` (ratio de contenu par patch, seuil à 0.5).
+
+**A2 — CSLS** : Implémenté tel que prévu. `CSLS(x,y) = 2·cos(x,y) - mean_kNN(x) - mean_kNN(y)` avec k=10 et `np.partition` pour les k-NN en O(n).
+
+**A3 — Cohérence spatiale** : Implémenté tel que prévu. Modèle de déplacement médian, seuil d'inlier à 2.0 patches.
+
+### Résultats
+
+| Métrique | v0 | v2 |
+|----------|-----|-----|
+| Accuracy | 21.4% | 85.7% |
+| Spécificité | 18.5% | 88.9% |
+| Recall | 100% | 0% |
+| TP / TN / FP / FN | 1 / 5 / 22 / 0 | 0 / 24 / 3 / 1 |
+
+**Distribution des scores v2** :
+| Type | Min | Max | Mean |
+|------|-----|-----|------|
+| Same (titine) | 0.101 | 0.101 | 0.101 |
+| Different | 0.036 | 0.206 | 0.095 |
+| **Gap** | **-0.105** (OVERLAP) |
+
+**Matrice de similarité v2** :
+```
+             195851  195931  195941  195956  200016  200058  titine1 titine2
+195851        1.000   0.097   0.051   0.050   0.072   0.036   0.074   0.078
+195931        0.097   1.000   0.151   0.139   0.142   0.040   0.149   0.084
+195941        0.051   0.151   1.000   0.133   0.125   0.064   0.144   0.088
+195956        0.050   0.139   0.133   1.000   0.206   0.038   0.129   0.076
+200016        0.072   0.142   0.125   0.206   1.000   0.049   0.158   0.079
+200058        0.036   0.040   0.064   0.038   0.049   1.000   0.049   0.067
+titine1       0.074   0.149   0.144   0.129   0.158   0.049   1.000   0.101
+titine2       0.078   0.084   0.088   0.076   0.079   0.067   0.101   1.000
+```
+
+**Top résultats détaillés** :
+| # | Image 1 | Image 2 | Score | Matches | Inliers | Préd | Réel |
+|---|---------|---------|-------|---------|---------|------|------|
+| 1 | 195956 | 200016 | 0.206 | 37 | 36 | SAME | DIFF |
+| 2 | 200016 | titine-1 | 0.158 | 29 | 23 | SAME | DIFF |
+| 3 | 195931 | 195941 | 0.151 | 33 | 23 | SAME | DIFF |
+| … | | | | | | | |
+| 11 | titine-1 | titine-2 | 0.101 | 37 | 22 | DIFF | SAME |
+
+### Analyse
+
+**Progrès** :
+- L'accuracy passe de 21.4% à 85.7% (+64 points)
+- Les scores sont beaucoup plus bas et différenciés (0.03-0.21 vs 0.12-0.74 en v0)
+- IMG_200058 est correctement isolé (scores 0.036-0.067)
+- Le filtrage padding réduit de 256 à ~64 patches utiles pour les images étroites
+
+**Limitations persistantes** :
+1. **Images trop étroites** : Les images segmentées ont un ratio d'aspect ~0.25, ne laissant que **64 patches de contenu sur 256** (25%). Avec si peu de patches, la discrimination inter-individus est faible.
+2. **Cohérence spatiale trompeuse** : Les paires d'images de même forme (salamandres étroites verticales) obtiennent une forte cohérence spatiale même entre individus différents (36/37 inliers pour 195956↔200016), car les patches "tête", "corps", "queue" se retrouvent aux mêmes positions relatives.
+3. **Poses différentes pour titine** : titine-1 (110×400) et titine-2 (218×400) ont des cadrages très différents. Le modèle de déplacement médian (translation rigide) n'est pas adapté → seulement 22/37 inliers (59%).
+4. **Gap négatif** : La paire same (0.101) ne se sépare pas des paires different (max 0.206).
+
+### Pistes d'amélioration future
+
+1. **Images de meilleure qualité** : Des crops plus larges (ratio > 0.5) augmenteraient significativement le nombre de patches utiles.
+2. **Modèle géométrique flexible** : Remplacer le déplacement médian par une transformation affine ou similitude pour mieux gérer les changements de pose/échelle.
+3. **A4 — Pondération par distinctivité** : Donner plus de poids aux patches discriminants (taches jaunes) vs génériques (corps noir).
+4. **Fine-tuning DINOv2** : Entraîner les dernières couches sur des paires salamandre pour des features plus discriminantes au niveau individuel.
+
+---
+
 ## Statut actuel
 
-- **Algorithme en production** : v0 (mutual nearest neighbor)
-- **Performance** : 21.4% accuracy — le dataset est correct, l'algorithme ne discrimine pas
-- **Prochaine étape** : Implémenter v2 (A1 → A2 → A3 → recalibrage seuils)
+- **Algorithme en production** : v2 (CSLS + cohérence spatiale + filtrage padding géométrique)
+- **Performance** : 85.7% accuracy — amélioration significative mais gap négatif persiste
+- **Limitation principale** : Images segmentées trop étroites (64 patches utiles) et poses trop différentes entre photos du même individu
+- **Prochaine étape** : Améliorer la qualité des images (crops plus larges) ou implémenter un modèle géométrique plus flexible
 
 ---
