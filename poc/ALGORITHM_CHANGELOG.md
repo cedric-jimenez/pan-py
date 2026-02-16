@@ -315,11 +315,400 @@ titine2       0.078   0.084   0.088   0.076   0.079   0.067   0.101   1.000
 
 ---
 
+## A4 — Pondération par distinctivité des patches
+
+**Date** : 2026-02-16
+
+**Objectif** : Donner plus de poids aux matches entre patches distinctifs (taches jaunes) vs génériques (corps noir) pour améliorer le gap same/different.
+
+### A4v1 — Centroïde + moyenne géométrique
+
+**Principe** :
+- Distinctivité = `1 - cos(patch, centroïde_image)` (centroïde = moyenne L2-normalisée des patches)
+- Poids match (i,j) = `sqrt(dist_i × dist_j)` (moyenne géométrique)
+- Score = `spatial_ratio × np.average(csls_inliers, weights=poids)`
+
+**Résultats** :
+
+| Métrique | v2 (baseline) | v2 + A4v1 |
+|----------|--------------|-----------|
+| Accuracy | 85.7% | 82.1% |
+| Gap | -0.105 | -0.108 |
+| titine-1↔titine-2 | 0.101 | 0.103 |
+
+**Verdict** : **RÉGRESSION**. Les poids sont trop uniformes — le centroïde est dominé par les patches corps noir (~60 patches sur 64), donc les distances au centroïde varient peu. La moyenne géométrique n'amplifie pas assez la différence.
+
+---
+
+### A4v2 — Poids exponentiels
+
+**Hypothèse** : Amplifier les écarts de distinctivité avec une exponentielle pour créer une séparation plus nette entre patches génériques et distinctifs.
+
+**Principe** :
+- Même distinctivité centroïde que v1
+- Poids = `exp(beta × sqrt(dist_i × dist_j))` au lieu de la valeur brute
+- beta = 5.0
+
+**Résultats** :
+
+| Métrique | v2 (baseline) | v2 + A4v2 |
+|----------|--------------|-----------|
+| Accuracy | 85.7% | 78.6% |
+| Gap | -0.105 | -0.107 |
+| titine-1↔titine-2 | 0.101 | 0.103 |
+| FP | 3 | 5 |
+
+**Verdict** : **RÉGRESSION**. L'exponentielle amplifie le bruit, pas le signal. Les paires different montent plus que la paire same.
+
+---
+
+### A4v3 — Distinctivité kNN intra-image
+
+**Hypothèse** : La distance au centroïde est trop grossière. Mesurer l'unicité locale (combien le patch diffère de ses k plus proches voisins dans la même image) est plus discriminant.
+
+**Principe** :
+- Similarité intra-image : `p @ p.T`, exclure self
+- Distinctivité = `1 - mean(top_k_similarities)` avec k=5
+- Poids = `sqrt(dist_i × dist_j)` (moyenne géométrique)
+
+**Résultats** :
+
+| Métrique | v2 (baseline) | v2 + A4v3 |
+|----------|--------------|-----------|
+| Accuracy | 85.7% | 75.0% |
+| Gap | -0.105 | -0.116 |
+| titine-1↔titine-2 | 0.101 | 0.106 |
+| FP | 3 | 6 |
+
+**Verdict** : **RÉGRESSION FORTE**. Le calcul kNN intra-image identifie des patches "distinctifs" (bords, extrémités) qui sont uniques dans l'image mais pas discriminants entre individus. Tous les scores montent.
+
+---
+
+### A4v4 — Filtrage top-k (2 sous-variantes)
+
+**Hypothèse** : La pondération continue dilue l'effet. Un filtrage binaire serait plus efficace.
+
+**Principe** :
+- Calculer la distinctivité kNN intra-image (A4v3)
+- Ne garder que les matches où **les deux** patches sont dans le top-50% par distinctivité
+- Variante a : recalculer spatial_ratio ET mean_csls sur les matches filtrés
+- Variante b : garder spatial_ratio sur tous les inliers, filtrer seulement mean_csls
+
+**Résultats** :
+
+| Métrique | v2 (baseline) | A4v4a (full filter) | A4v4b (csls only) |
+|----------|--------------|--------------------|--------------------|
+| Accuracy | 85.7% | 96.4% | 71.4% |
+| Gap | -0.105 | -0.043 | -0.143 |
+| titine-1↔titine-2 | 0.101 | 0.058 | 0.116 |
+| FP | 3 | 0 | 7 |
+| FN | 1 | 1 | 1 |
+
+**Analyse A4v4a** : 96.4% accuracy par écrasement de tous les scores. Tous les FP disparaissent mais le score same (0.058) est loin sous le seuil. Le gap reste négatif. L'accuracy élevée est un artefact — l'algo dit "different" pour tout.
+
+**Analyse A4v4b** : Le filtrage sélectionne les matches distinctifs qui ont des CSLS plus élevés pour toutes les paires, ce qui amplifie les FP.
+
+---
+
+### Conclusion A4
+
+**A4 ne fonctionne pas**, quelle que soit la variante testée. Le problème est fondamental :
+
+1. **"Distinctif" ≠ "discriminant"** : Un patch de bout de queue ou de bord de corps est "distinctif" (éloigné du centroïde/voisins dans l'espace embedding) mais pas "discriminant" (tous les individus ont un bout de queue). Seuls les patches de motifs uniques (taches jaunes spécifiques) sont discriminants, mais DINOv2 ne les représente pas assez distinctement à la résolution 14×14 px.
+
+2. **Signal symétrique** : La pondération amplifie les scores de TOUTES les paires (same ET different) car les patches "distinctifs" existent dans toutes les images. Le ratio same/different ne change pas.
+
+3. **Résolution insuffisante** : Avec seulement 64 patches de contenu et des spots couvrant 1-2 patches, le signal distinctif est trop faible pour pondérer utilement.
+
+**Code reverté au baseline v2** (85.7% accuracy).
+
+---
+
 ## Statut actuel
 
-- **Algorithme en production** : v2 (CSLS + cohérence spatiale + filtrage padding géométrique)
-- **Performance** : 85.7% accuracy — amélioration significative mais gap négatif persiste
-- **Limitation principale** : Images segmentées trop étroites (64 patches utiles) et poses trop différentes entre photos du même individu
-- **Prochaine étape** : Améliorer la qualité des images (crops plus larges) ou implémenter un modèle géométrique plus flexible
+- **Algorithme en production** : v2 (A1 + A2 + A3 — CSLS + cohérence spatiale + filtrage padding géométrique)
+- **Performance** : 85.7% accuracy, gap -0.105 (négatif)
+- **A4 abandonné** : 4 variantes testées, toutes en régression ou gain illusoire
+- **Limitation principale** : Images segmentées trop étroites (64 patches utiles), poses trop différentes entre photos du même individu, DINOv2 ne capture pas suffisamment les motifs individuels à cette résolution
+
+### Pistes restantes
+
+1. **Augmenter la résolution** : Utiliser des images plus grandes (448×448 → 1024 patches) pour capter les spots
+2. **Modèle géométrique flexible** : Transformation affine au lieu de translation rigide (A3+)
+3. **Fine-tuning DINOv2** : Entraîner sur des paires salamandre pour des features plus discriminantes
+4. **Meilleure segmentation** : Crops plus larges (ratio > 0.5) pour plus de patches utiles
+5. **Multi-scale matching** : Combiner patch tokens de différentes couches DINOv2
+
+---
+
+## POC "Morse Code" — Approche vision classique
+
+**Date** : 2026-02-16
+
+### Motivation
+
+Plutôt que de tâtonner algorithmiquement, reproduire la méthode humaine d'identification :
+1. Chercher des taches jaunes avec des formes distinctives (crochets, angles)
+2. Lire le pattern jaune/noir le long du corps comme du morse
+3. 2-3 formes distinctives + même code morse = même individu
+
+### Pipeline
+
+```
+Image → Segmentation corps (LAB/Otsu) → Segmentation spots (luminosité dans le corps)
+     → Axe médian (ridge de la distance transform)
+     → Signal 1D morse (ratio spots perpendiculairement à l'axe, tronqué à la queue)
+     → Blobs (composantes connexes) + descripteurs de forme (Hu moments, circularité)
+```
+
+### Évolution du POC
+
+| Étape | Problème résolu | Résultat |
+|-------|----------------|----------|
+| HSV jaune | Segmentation couleur | Échec : certaines taches sont crème/blanc, pas jaune pur |
+| Otsu luminosité dans body mask | Détection universelle des spots | OK sur toutes les images |
+| Squelette morphologique | Axe du corps | Échec : résidus épais, chemin de 3-8px |
+| PCA slicing | Axe médian robuste | Signaux structurés mais axe droit → déformé sur corps courbés |
+| Distance transform ridge | Axe courbe suivant le corps | Signaux corrects, DTW gap = -0.059 |
+| Blob shape matching | Formes distinctives des taches | **Premier gap positif : +0.084** |
+
+### Résultats
+
+| Métrique | DTW morse seul | Blob seul | Combiné 30/70 | Combiné 50/50 |
+|----------|---------------|-----------|---------------|---------------|
+| titine-1↔titine-2 | 0.760 | 0.616 | 0.660 | 0.688 |
+| Max different | 0.819 | 0.532 | 0.590 | 0.653 |
+| **Gap** | -0.059 | **+0.084** | **+0.070** | +0.035 |
+
+**Le blob shape matching (Hu moments + circularité) est la première méthode à produire un gap positif** sur ce dataset. Les formes des taches individuelles sont plus discriminantes que le pattern 1D le long du corps.
+
+### Analyse
+
+**Ce qui marche** :
+- Les descripteurs de forme (Hu moments) sont invariants à la rotation, l'échelle et la translation — parfait pour comparer des taches sur des poses différentes
+- La circularité capture les "crochets" et angles que l'humain utilise
+- Le matching positionnel (position le long de l'axe) réduit les faux matches
+
+**Limites actuelles** :
+- Le blob matching est asymétrique (score(A,B) ≠ score(B,A)) car on cherche pour chaque blob de A le meilleur match dans B
+- Le seuil de distance Hu moments (0.3 dans exp(-d×0.3)) est arbitraire
+- La segmentation Otsu varie selon les images (sur-/sous-segmentation)
+- Le signal morse 1D n'apporte pas de valeur ajoutée par rapport aux blobs seuls
+
+---
+
+## POC Blob Matching — Itérations d'amélioration
+
+**Date** : 2026-02-16
+
+### Symétrisation du matching
+
+**Problème** : `match_blobs(A, B) ≠ match_blobs(B, A)` car on cherche pour chaque blob source le meilleur match dans la destination, or les ensembles de blobs sont asymétriques.
+
+**Solution** : `score = (directed(A→B) + directed(B→A)) / 2`
+
+**Résultat** : Gap passe de +0.084 à **+0.102**.
+
+| Métrique | Avant (asymétrique) | Après (symétrique) |
+|----------|--------------------|--------------------|
+| titine-1↔titine-2 | 0.616 | 0.589 |
+| Max different | 0.532 | 0.487 |
+| **Gap** | +0.084 | **+0.102** |
+
+---
+
+### Round 1 — Axes d'amélioration des descripteurs et du matching
+
+Trois axes testés en parallèle pour améliorer le gap au-delà de +0.102 :
+
+#### Axe 1 : Descripteurs de Fourier du contour + solidity
+
+**Hypothèse** : Les Hu moments sont limités pour les formes concaves (crochets, angles). Les coefficients de Fourier de la frontière capturent mieux ces détails.
+
+**Implémentation** :
+- Fourier : DFT du contour (complexe), magnitudes (rotation-invariant), normalisé par 1er coeff (scale-invariant)
+- Solidity : `area / convex_hull_area` (bas = forme concave/crochet)
+- Distance = `fd_dist * 0.5 + circ_dist * 2 + solid_dist * 3`
+
+**Résultat** : **ÉCHEC**. Les descripteurs de Fourier sont *trop* invariants — tous les blobs de salamandre se ressemblent quand on utilise la fréquence de frontière. Scores uniformément élevés (~0.85), aucune discrimination.
+
+| | Same | Max diff | Gap |
+|---|------|----------|-----|
+| Baseline v0 | 0.589 | 0.487 | **+0.102** |
+| Axe 1 (Fourier) | 0.873 | 0.892 | -0.019 |
+
+#### Axe 2 : Pénalité blobs non-matchés + pondération par aire + top-N
+
+**Hypothèse** : Pénaliser les blobs sans correspondance et pondérer par taille des blobs pour réduire les FP.
+
+**Implémentation** :
+- Top-N = 7 blobs max par image
+- Pénalité : `score × (n_matched / n_total)`
+- Poids : `np.average(scores, weights=area_ratio)`
+
+**Résultat** : Gap positif mais inférieur au baseline. L'area-weighting favorise les gros blobs qui sont les moins distinctifs (gros blob = corps continu).
+
+| | Same | Max diff | Gap |
+|---|------|----------|-----|
+| Baseline v0 | 0.589 | 0.487 | **+0.102** |
+| Axe 2 (penalty) | 0.617 | 0.573 | +0.044 |
+
+#### Axe 3 : Constellation (pattern inter-blobs)
+
+**Hypothèse** : Le pattern spatial des blobs (distances relatives entre eux le long de l'axe) est une signature stable de l'individu.
+
+**Implémentation** :
+- Vecteur de gaps inter-blobs consécutifs triés par position
+- Distance L2 entre vecteurs, essai des 2 orientations
+- Pénalité pour nombre de blobs différent
+
+**Résultat** : **ÉCHEC**. Le pattern inter-blobs n'est pas stable entre photos du même individu (pose/angle différents changent les positions relatives).
+
+| | Same | Max diff | Gap |
+|---|------|----------|-----|
+| Baseline v0 | 0.589 | 0.487 | **+0.102** |
+| Axe 3 (constellation) | 0.518 | 0.701 | -0.183 |
+
+#### Combinaison Axe 1+2+3
+
+Fourier noie le signal. Résultat : gap -0.049.
+
+**Conclusion Round 1** : Le baseline v0 (Hu moments + circularité) reste le meilleur. Les descripteurs de Fourier et la constellation ne sont pas discriminants pour ce type de données.
+
+---
+
+### Round 2 — Convexity defects, filtre non-rond, grid search hyperparamètres
+
+Trois nouvelles pistes testées :
+
+#### Piste 1 : Convexity defects (creux du contour)
+
+**Hypothèse** : Les convexity defects mesurent directement les concavités (crochets, angles) sans les problèmes de Fourier.
+
+**Implémentation** :
+- `cv2.convexityDefects()` → profondeurs normalisées par √area
+- Top 5 profondeurs les plus profondes comme descripteur
+- Distance = `hu_dist + circ_dist*2 + defect_dist*3 + solid_dist*2`
+
+**Résultat** : Gap positif mais inférieur au baseline. Les defects ajoutent du bruit — les formes de taches ont peu de concavités profondes, elles sont plutôt irrégulières que concaves.
+
+| | Same | Max diff | Gap |
+|---|------|----------|-----|
+| Baseline v0 | 0.589 | 0.487 | +0.102 |
+| Piste 1 (defects) | 0.489 | 0.398 | +0.091 |
+
+#### Piste 2 : Filtre non-rond (circularité < 0.7)
+
+**Hypothèse** : Les blobs ronds sont génériques (petites taches rondes identiques entre individus). En les excluant, on ne compare que les formes distinctives.
+
+**Implémentation** : Simple filtre `blob['circularity'] < 0.7` avant matching.
+
+**Résultat** : **MEILLEUR RÉSULTAT** — gap +0.152, soit +49% vs baseline.
+
+| | Same | Max diff | Gap |
+|---|------|----------|-----|
+| Baseline v0 | 0.589 | 0.487 | +0.102 |
+| **Piste 2 (non-round)** | **0.683** | **0.531** | **+0.152** |
+
+**Analyse** : La logique est directe — les blobs ronds (circularité > 0.7) sont interchangeables entre individus. Les blobs irréguliers (allongés, à crochets, angles) sont les signatures individuelles. Le filtre élimine le bruit tout en gardant le signal.
+
+#### Piste 1+2 : Defects + non-round
+
+Combinaison des deux pistes. Gap +0.146 — les defects n'apportent rien de plus que le filtre non-rond seul.
+
+#### Piste 3 : Grid search hyperparamètres
+
+**Paramètres optimisés** :
+- `decay` (dans `exp(-d * decay)`) : contrôle la sensibilité à la distance
+- `max_position_diff` : tolérance de position le long de l'axe
+- `size_ratio` : tolérance de taille relative entre blobs
+
+**Résultat** (sans filtre non-rond) : Best gap +0.118 à `decay=0.3, max_pos=0.3, size=(0.3, 3)`.
+
+| | Same | Max diff | Gap |
+|---|------|----------|-----|
+| v0 defaults | 0.589 | 0.487 | +0.102 |
+| Piste 3 (tuned) | 0.576 | 0.457 | +0.118 |
+
+Les hyperparamètres optimaux sont proches des défauts choisis à la main, ce qui est rassurant.
+
+#### Combinaison Piste 2 + Piste 3 : Grid search complet
+
+Grid search combinant le seuil de circularité + tous les hyperparamètres.
+
+**Top 5 configurations** :
+
+| circ | decay | max_pos | size | Same | Max diff | Gap |
+|------|-------|---------|------|------|----------|-----|
+| 0.7 | 0.30 | 0.30 | 0.3-3 | 0.682 | 0.515 | **+0.166** |
+| 0.7 | 0.40 | 0.30 | 0.3-3 | 0.606 | 0.441 | +0.164 |
+| 0.6 | 0.30 | 0.30 | 0.3-3 | 0.670 | 0.509 | +0.161 |
+| 0.6 | 0.40 | 0.30 | 0.3-3 | 0.597 | 0.437 | +0.160 |
+| 0.7 | 0.50 | 0.30 | 0.3-3 | 0.540 | 0.383 | +0.157 |
+
+**Observations** :
+- **circ ∈ [0.5, 0.7]** domine systématiquement le top 20 : le filtre non-rond est robuste
+- **max_pos = 0.3** est optimal dans toutes les configs
+- **size = (0.3, 3)** (strict) bat toujours (0.2, 5) et (0.1, 10)
+- **decay ∈ [0.3, 0.5]** — pas de pic isolé, résultat stable
+
+**Meilleur résultat** : `circ < 0.7, decay = 0.3, max_pos = 0.3, size = 0.3-3` → **gap +0.166**
+
+**Matrice de similarité (meilleure config)** :
+```
+             195851  195931  195941  195956  200016  200058  titine1 titine2
+195851        1.000   0.308   0.096   0.210   0.354   0.250   0.315   0.224
+195931        0.308   1.000   0.330   0.456   0.409   0.400   0.351   0.387
+195941        0.096   0.330   1.000   0.331   0.405   0.248   0.452   0.442
+195956        0.210   0.456   0.331   1.000   0.471   0.438   0.515   0.497
+200016        0.354   0.409   0.405   0.471   1.000   0.371   0.436   0.388
+200058        0.250   0.400   0.248   0.438   0.371   1.000   0.404   0.393
+titine1       0.315   0.351   0.452   0.515   0.436   0.404   1.000   0.682
+titine2       0.224   0.387   0.442   0.497   0.388   0.393   0.682   1.000
+```
+
+Le confondant principal est `195956↔titine-1` à 0.515 (marge de 0.166 avec le same-pair à 0.682).
+
+---
+
+### Récapitulatif des expériences blob matching
+
+| Variante | Same | Max diff | Gap | Statut |
+|----------|------|----------|-----|--------|
+| Baseline (Hu + circ, asymétrique) | 0.616 | 0.532 | +0.084 | dépassé |
+| Baseline symétrique | 0.589 | 0.487 | +0.102 | dépassé |
+| Fourier + solidity | 0.873 | 0.892 | -0.019 | échec |
+| Penalty + weight + topN | 0.617 | 0.573 | +0.044 | échec |
+| Constellation | 0.518 | 0.701 | -0.183 | échec |
+| Convexity defects | 0.489 | 0.398 | +0.091 | inférieur |
+| **Non-round (circ < 0.7)** | **0.683** | **0.531** | **+0.152** | **bon** |
+| Defects + non-round | 0.561 | 0.415 | +0.146 | bon |
+| Hyperparams tunés (sans filtre) | 0.576 | 0.457 | +0.118 | bon |
+| **Non-round + hyperparams tunés** | **0.682** | **0.515** | **+0.166** | **meilleur** |
+
+---
+
+## Statut actuel
+
+- **Algorithme en production** : v2 (A1 + A2 + A3 — DINOv2 CSLS + cohérence spatiale)
+- **Performance v2** : 85.7% accuracy, gap -0.105
+- **A4 abandonné** : pondération par distinctivité, 4 variantes testées, toutes en régression
+- **POC blob matching** : gap **+0.166** avec filtre non-rond + hyperparams tunés
+  - Meilleurs paramètres : `circ < 0.7, decay = 0.3, max_pos = 0.3, size_ratio = 0.3-3`
+  - Signal morse DTW non-discriminant seul (gap -0.059) — abandonné comme feature
+  - **Le filtre non-round est l'insight clé** : les blobs ronds sont génériques, seules les formes irrégulières discriminent
+- **Limitation** : 1 seul same-pair dans le dataset (titine), résultats à valider sur plus d'images
+- **Confondant principal** : 195956↔titine-1 (0.515) — même zone du corps, formes irrégulières similaires
+
+### Code
+
+`poc/morse_poc.py` — POC complet avec :
+- `segment_body()` / `segment_spots()` : segmentation corps + taches
+- `compute_medial_axis()` : axe courbe via distance transform ridge
+- `project_to_morse()` / `dtw_similarity()` : signal 1D (non-discriminant)
+- `extract_blobs()` : extraction avec Hu moments, circularité, solidity, convexity defects, Fourier
+- `match_blobs()` : matching symétrique de formes
+- `_filter_non_round()` : filtre les blobs ronds (circ > 0.7)
+- `_match_blobs_param()` : matching paramétrable pour grid search
 
 ---
