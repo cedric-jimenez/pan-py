@@ -6,7 +6,7 @@ import os
 import sys
 import time
 from contextlib import asynccontextmanager
-from enum import Enum
+from enum import StrEnum
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,7 +30,7 @@ from app.utils import pil_to_base64
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
-class ImageFormat(str, Enum):
+class ImageFormat(StrEnum):
     JPEG = "JPEG"
     PNG = "PNG"
 
@@ -289,7 +289,9 @@ async def crop_salamander(
         raise
     except Exception as e:
         logger.error(f"Error processing image: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error processing image.") from e
+        raise HTTPException(
+            status_code=500, detail="Internal server error processing image."
+        ) from e
 
 
 # Background color mapping
@@ -436,7 +438,9 @@ async def segment_salamander(
         raise
     except Exception as e:
         logger.error(f"Error processing image for segmentation: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error processing image.") from e
+        raise HTTPException(
+            status_code=500, detail="Internal server error processing image."
+        ) from e
 
 
 @app.get("/model-info")
@@ -524,7 +528,9 @@ async def embed_image(
         raise
     except Exception as e:
         logger.error(f"Error extracting embedding: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error extracting embedding.") from e
+        raise HTTPException(
+            status_code=500, detail="Internal server error extracting embedding."
+        ) from e
 
 
 @app.post("/verify", response_model=VerificationResponse)
@@ -627,4 +633,6 @@ async def verify_images(
         raise
     except Exception as e:
         logger.error(f"Error during verification: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error during verification.") from e
+        raise HTTPException(
+            status_code=500, detail="Internal server error during verification."
+        ) from e

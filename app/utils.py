@@ -34,5 +34,3 @@ def pil_to_base64(image: Image.Image, format: str = "JPEG", quality: int = 85) -
         image.save(buffered, format=format)
     img_str = base64.b64encode(buffered.getvalue()).decode()
     return img_str
-
-
