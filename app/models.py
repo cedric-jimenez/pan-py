@@ -86,3 +86,19 @@ class VerificationResponse(BaseModel):
     results: list[VerificationResult] = Field(
         default_factory=list, description="Verification results sorted by score"
     )
+
+
+class CompareEmbeddingsRequest(BaseModel):
+    """Request model for embedding comparison."""
+
+    embedding1: list[float] = Field(..., description="First normalized embedding vector")
+    embedding2: list[float] = Field(..., description="Second normalized embedding vector")
+
+
+class CompareEmbeddingsResponse(BaseModel):
+    """Response model for embedding comparison."""
+
+    cosine_similarity: float = Field(
+        ..., description="Cosine similarity between the two embeddings (-1 to 1)"
+    )
+    embedding_dim: int = Field(..., description="Embedding dimension")

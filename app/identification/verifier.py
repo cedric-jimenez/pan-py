@@ -104,20 +104,19 @@ class SalamanderVerifier:
         nn_1to2 = sim_matrix.argmax(axis=1)  # (N,)
         nn_2to1 = sim_matrix.argmax(axis=0)  # (M,)
 
-        # Keep only mutual nearest neighbors
-        mutual_sims = []
-        for i, j in enumerate(nn_1to2):
-            if nn_2to1[j] == i:
-                mutual_sims.append(float(sim_matrix[i, j]))
-
+        # Keep only mutual nearest neighbors (vectorized)
         n_patches = len(patches1)
-        if len(mutual_sims) == 0 or n_patches == 0:
+        if n_patches == 0:
             return 0.0
 
-        match_ratio = len(mutual_sims) / n_patches
-        mean_sim = float(np.mean(mutual_sims))
+        indices = np.arange(n_patches)
+        mutual_mask = nn_2to1[nn_1to2] == indices
+        if not mutual_mask.any():
+            return 0.0
 
-        return match_ratio * mean_sim
+        mutual_sims = sim_matrix[indices[mutual_mask], nn_1to2[mutual_mask]]
+        match_ratio = float(mutual_mask.sum()) / n_patches
+        return match_ratio * float(mutual_sims.mean())
 
     def verify(
         self,
@@ -159,15 +158,19 @@ class SalamanderVerifier:
         self,
         query_image: Image.Image,
         candidate_images: list[Image.Image],
+        cosine_threshold: float = 0.0,
     ) -> list[_VerifyResult]:
         """Verify a query image against multiple candidates.
 
         Extracts query features once, then compares against each candidate
-        using patch-level matching.
+        using patch-level matching. Candidates whose cosine similarity falls
+        below cosine_threshold are fast-rejected without running patch matching.
 
         Args:
             query_image: Query PIL Image.
             candidate_images: List of candidate PIL Images.
+            cosine_threshold: Skip patch matching for candidates with cosine
+                similarity below this value (0.0 = disabled).
 
         Returns:
             List of verification results, sorted by score descending.
@@ -182,6 +185,21 @@ class SalamanderVerifier:
             cand_emb, cand_patches = self.embedder.extract_features(candidate)
 
             cosine_sim = float(np.dot(query_emb, cand_emb))
+
+            if cosine_sim < cosine_threshold:
+                results.append(
+                    {
+                        "candidate_index": idx,
+                        "is_same": False,
+                        "score": 0.0,
+                        "confidence": "high",
+                        "cosine_similarity": cosine_sim,
+                        "matches": 0,
+                        "inliers": 0,
+                    }
+                )
+                continue
+
             score = self._patch_match_score(query_patches, cand_patches)
             is_same, confidence = self._classify(score)
 
