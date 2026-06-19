@@ -7,6 +7,7 @@ rather than just species-level features.
 
 import logging
 import warnings
+from typing import Any
 
 import numpy as np
 import torch
@@ -138,7 +139,7 @@ class SalamanderEmbedder:
         """
         return patch_tokens.clamp(min=1e-6).pow(p).mean(dim=1).pow(1.0 / p)
 
-    def _forward_features(self, tensor: torch.Tensor) -> dict:
+    def _forward_features(self, tensor: torch.Tensor) -> dict[str, Any]:
         """Run DINOv2 forward pass returning all features.
 
         Args:
@@ -147,8 +148,9 @@ class SalamanderEmbedder:
         Returns:
             Dict with 'x_norm_clstoken' and 'x_norm_patchtokens'.
         """
+        assert self.model is not None  # guarded by callers via is_model_loaded()
         with torch.no_grad():
-            return self.model.forward_features(tensor)
+            return self.model.forward_features(tensor)  # type: ignore[no-any-return]
 
     def extract_features(self, image: Image.Image) -> tuple[np.ndarray, np.ndarray]:
         """Extract both global embedding and patch tokens in a single pass.
