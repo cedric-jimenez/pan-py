@@ -22,7 +22,7 @@ DEFAULT_MEDIUM_THRESHOLD = 0.15
 DEFAULT_LOW_THRESHOLD = 0.10
 
 
-class VerificationResult(TypedDict):
+class _VerifyResult(TypedDict):
     candidate_index: int
     is_same: bool
     score: float
@@ -159,7 +159,7 @@ class SalamanderVerifier:
         self,
         query_image: Image.Image,
         candidate_images: list[Image.Image],
-    ) -> list[VerificationResult]:
+    ) -> list[_VerifyResult]:
         """Verify a query image against multiple candidates.
 
         Extracts query features once, then compares against each candidate
@@ -177,7 +177,7 @@ class SalamanderVerifier:
 
         query_emb, query_patches = self.embedder.extract_features(query_image)
 
-        results: list[VerificationResult] = []
+        results: list[_VerifyResult] = []
         for idx, candidate in enumerate(candidate_images):
             cand_emb, cand_patches = self.embedder.extract_features(candidate)
 

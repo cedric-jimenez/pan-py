@@ -7,6 +7,7 @@ rather than just species-level features.
 
 import logging
 import warnings
+from typing import Any
 
 import numpy as np
 import torch
@@ -138,7 +139,7 @@ class SalamanderEmbedder:
         """
         return patch_tokens.clamp(min=1e-6).pow(p).mean(dim=1).pow(1.0 / p)
 
-    def _forward_features(self, tensor: torch.Tensor) -> dict:
+    def _forward_features(self, tensor: torch.Tensor) -> dict[str, Any]:
         """Run DINOv2 forward pass returning all features.
 
         Args:
@@ -147,8 +148,9 @@ class SalamanderEmbedder:
         Returns:
             Dict with 'x_norm_clstoken' and 'x_norm_patchtokens'.
         """
+        assert self.model is not None  # guarded by callers via is_model_loaded()
         with torch.no_grad():
-            return self.model.forward_features(tensor)
+            return self.model.forward_features(tensor)  # type: ignore[no-any-return]
 
     def extract_features(self, image: Image.Image) -> tuple[np.ndarray, np.ndarray]:
         """Extract both global embedding and patch tokens in a single pass.
@@ -176,7 +178,7 @@ class SalamanderEmbedder:
         # Global embedding via GeM pooling
         embedding = self._gem_pool(patch_tokens)  # (1, D)
         embedding_np: np.ndarray = embedding.numpy().flatten()
-        embedding_np = embedding_np / np.linalg.norm(embedding_np)
+        embedding_np = embedding_np / np.clip(np.linalg.norm(embedding_np), 1e-6, None)
 
         # L2-normalize each patch token for cosine similarity
         tokens_np: np.ndarray = patch_tokens.numpy()[0]  # (N, D)
@@ -232,6 +234,6 @@ class SalamanderEmbedder:
         # L2 normalize
         embeddings_np: np.ndarray = embeddings.numpy()
         norms = np.linalg.norm(embeddings_np, axis=1, keepdims=True)
-        embeddings_np = embeddings_np / norms
+        embeddings_np = embeddings_np / np.clip(norms, 1e-6, None)
 
         return embeddings_np

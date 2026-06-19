@@ -4,7 +4,9 @@ import io
 import logging
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
+from enum import StrEnum
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +26,14 @@ from app.models import (
     VerificationResult,
 )
 from app.utils import pil_to_base64
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+class ImageFormat(StrEnum):
+    JPEG = "JPEG"
+    PNG = "PNG"
+
 
 # Configure JSON logging for Railway
 log_handler = logging.StreamHandler(sys.stdout)
@@ -75,10 +85,12 @@ app = FastAPI(
 )
 
 # Configure CORS for Next.js integration
+_origins = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("ALLOWED_ORIGINS", "*").split(","),
-    allow_credentials=True,
+    allow_origins=_origins,
+    # Credentials require explicit origins — wildcard + credentials is invalid per CORS spec
+    allow_credentials="*" not in _origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -115,8 +127,8 @@ async def crop_salamander(
         0.25, ge=0.0, le=1.0, description="Confidence threshold for detection"
     ),
     return_base64: bool = Query(True, description="Whether to return the cropped image as base64"),
-    image_format: str = Query(
-        "JPEG", description="Output image format (JPEG or PNG). JPEG is much faster."
+    image_format: ImageFormat = Query(
+        ImageFormat.JPEG, description="Output image format (JPEG or PNG). JPEG is much faster."
     ),
     image_quality: int = Query(
         85, ge=1, le=95, description="JPEG quality (1-95, only used for JPEG format)"
@@ -158,12 +170,15 @@ async def crop_salamander(
         )
 
     try:
-        import time
-
         start_time = time.time()
 
         # Read and open image
         contents = await file.read()
+        if len(contents) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+            )
         read_time = time.time() - start_time
         logger.info(
             f"Processing image: {file.filename} ({len(contents)} bytes) - read: {read_time:.3f}s"
@@ -270,9 +285,13 @@ async def crop_salamander(
             original_height=original_height,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error processing image: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}") from e
+        raise HTTPException(
+            status_code=500, detail="Internal server error processing image."
+        ) from e
 
 
 # Background color mapping
@@ -290,8 +309,8 @@ async def segment_salamander(
         0.25, ge=0.0, le=1.0, description="Confidence threshold for detection"
     ),
     background: str = Query("gray", description="Background color: gray, white, or black"),
-    image_format: str = Query(
-        "JPEG", description="Output image format (JPEG or PNG). JPEG is much faster."
+    image_format: ImageFormat = Query(
+        ImageFormat.JPEG, description="Output image format (JPEG or PNG). JPEG is much faster."
     ),
     image_quality: int = Query(
         85, ge=1, le=95, description="JPEG quality (1-95, only used for JPEG format)"
@@ -335,12 +354,15 @@ async def segment_salamander(
         )
 
     try:
-        import time
-
         start_time = time.time()
 
         # Read and open image
         contents = await file.read()
+        if len(contents) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+            )
         read_time = time.time() - start_time
         logger.info(
             f"Processing image for segmentation: {file.filename} ({len(contents)} bytes) - read: {read_time:.3f}s"
@@ -412,9 +434,13 @@ async def segment_salamander(
             background_color=background,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error processing image for segmentation: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}") from e
+        raise HTTPException(
+            status_code=500, detail="Internal server error processing image."
+        ) from e
 
 
 @app.get("/model-info")
@@ -468,12 +494,15 @@ async def embed_image(
         )
 
     try:
-        import time
-
         start_time = time.time()
 
         # Read and open image
         contents = await file.read()
+        if len(contents) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+            )
         image = Image.open(io.BytesIO(contents))
 
         # Extract embedding
@@ -495,9 +524,13 @@ async def embed_image(
             model=embedder.model_name,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error extracting embedding: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error extracting embedding: {str(e)}") from e
+        raise HTTPException(
+            status_code=500, detail="Internal server error extracting embedding."
+        ) from e
 
 
 @app.post("/verify", response_model=VerificationResponse)
@@ -538,12 +571,15 @@ async def verify_images(
         )
 
     try:
-        import time
-
         start_time = time.time()
 
         # Load query image
         query_contents = await query.read()
+        if len(query_contents) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Query file too large. Maximum size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+            )
         query_image = Image.open(io.BytesIO(query_contents))
 
         # Load candidate images
@@ -555,6 +591,11 @@ async def verify_images(
                     detail=f"Invalid candidate file type: {cand.content_type}",
                 )
             cand_contents = await cand.read()
+            if len(cand_contents) > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Candidate file too large. Maximum size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+                )
             candidate_images.append(Image.open(io.BytesIO(cand_contents)))
 
         # Run verification
@@ -592,4 +633,6 @@ async def verify_images(
         raise
     except Exception as e:
         logger.error(f"Error during verification: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error during verification: {str(e)}") from e
+        raise HTTPException(
+            status_code=500, detail="Internal server error during verification."
+        ) from e
