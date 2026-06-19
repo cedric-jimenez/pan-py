@@ -8,6 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from enum import StrEnum
 
+import numpy as np
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
@@ -18,6 +19,8 @@ from app.detection import SalamanderDetector, SalamanderSegmenter
 from app.identification import SalamanderEmbedder, SalamanderVerifier
 from app.models import (
     BoundingBox,
+    CompareEmbeddingsRequest,
+    CompareEmbeddingsResponse,
     DetectionResponse,
     EmbeddingResponse,
     HealthResponse,
@@ -537,17 +540,26 @@ async def embed_image(
 async def verify_images(
     query: UploadFile = File(..., description="Query image (the new observation)"),
     candidates: list[UploadFile] = File(..., description="Candidate images to compare against"),
+    cosine_threshold: float = Query(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Skip patch matching for candidates whose cosine similarity is below this value. "
+            "0.0 = disabled. Set to ~0.5 to skip clearly dissimilar candidates."
+        ),
+    ),
 ):
     """
-    Verify if a query image matches any candidate images using SIFT.
+    Verify if a query image matches any candidate images using DINOv2 patch matching.
 
-    This endpoint performs detailed geometric matching using SIFT keypoints
-    and RANSAC filtering. Use this after retrieving candidates from a
-    vector database to confirm matches.
+    Extracts patch tokens from both images and computes a mutual nearest-neighbor
+    matching score. Use this after retrieving candidates from a vector database.
 
     Args:
         query: The query image (new salamander observation)
         candidates: List of candidate images to compare against
+        cosine_threshold: Fast-reject threshold on global cosine similarity (optional)
 
     Returns:
         VerificationResponse with results sorted by similarity score
@@ -600,7 +612,9 @@ async def verify_images(
 
         # Run verification
         verify_start = time.time()
-        results = verifier.verify_against_many(query_image, candidate_images)
+        results = verifier.verify_against_many(
+            query_image, candidate_images, cosine_threshold=cosine_threshold
+        )
         verify_time = time.time() - verify_start
 
         total_time = time.time() - start_time
@@ -636,3 +650,42 @@ async def verify_images(
         raise HTTPException(
             status_code=500, detail="Internal server error during verification."
         ) from e
+
+
+@app.post("/compare-embeddings", response_model=CompareEmbeddingsResponse)
+async def compare_embeddings(body: CompareEmbeddingsRequest):
+    """
+    Compute cosine similarity between two pre-computed embedding vectors.
+
+    Use this as a fast pre-filter instead of sending raw images to /verify:
+    retrieve candidates from the vector DB, compute cosine similarity here,
+    then only call /verify for the most promising ones.
+
+    The embeddings must come from /embed and be L2-normalized (they are by default).
+
+    Args:
+        body: Two embedding vectors of identical dimension.
+
+    Returns:
+        Cosine similarity score between -1 and 1. Higher = more similar.
+    """
+    if len(body.embedding1) != len(body.embedding2):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Embedding dimensions must match: "
+                f"{len(body.embedding1)} vs {len(body.embedding2)}"
+            ),
+        )
+
+    if len(body.embedding1) == 0:
+        raise HTTPException(status_code=400, detail="Embeddings must not be empty.")
+
+    emb1 = np.array(body.embedding1, dtype=np.float32)
+    emb2 = np.array(body.embedding2, dtype=np.float32)
+    cosine_sim = float(np.dot(emb1, emb2))
+
+    return CompareEmbeddingsResponse(
+        cosine_similarity=cosine_sim,
+        embedding_dim=len(body.embedding1),
+    )
