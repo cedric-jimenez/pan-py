@@ -176,7 +176,7 @@ class SalamanderEmbedder:
         # Global embedding via GeM pooling
         embedding = self._gem_pool(patch_tokens)  # (1, D)
         embedding_np: np.ndarray = embedding.numpy().flatten()
-        embedding_np = embedding_np / np.linalg.norm(embedding_np)
+        embedding_np = embedding_np / np.clip(np.linalg.norm(embedding_np), 1e-6, None)
 
         # L2-normalize each patch token for cosine similarity
         tokens_np: np.ndarray = patch_tokens.numpy()[0]  # (N, D)
@@ -232,6 +232,6 @@ class SalamanderEmbedder:
         # L2 normalize
         embeddings_np: np.ndarray = embeddings.numpy()
         norms = np.linalg.norm(embeddings_np, axis=1, keepdims=True)
-        embeddings_np = embeddings_np / norms
+        embeddings_np = embeddings_np / np.clip(norms, 1e-6, None)
 
         return embeddings_np

@@ -70,13 +70,9 @@ class SalamanderDetector(YOLOModelBase):
             f"size={width}x{height}px, confidence={confidence:.2%}"
         )
 
-        # Crop the image
-        cropped = image.crop((x1, y1, x2, y2))
-
         detection_data = {
             "bbox": {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)},
             "confidence": confidence,
-            "cropped_image": cropped,
         }
 
         return True, detection_data
