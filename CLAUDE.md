@@ -81,7 +81,7 @@ app/
 
 The embedder uses **GeM-pooled patch tokens** (not the CLS token). The CLS token only captures species-level similarity (all fire salamanders score ~0.92); patch tokens encode local spot/color patterns that distinguish individuals.
 
-`SalamanderVerifier._patch_match_score()` builds a cosine similarity matrix across all ~256 patch pairs, keeps only mutual nearest neighbors, then scores as `(match_ratio) × (mean_similarity)`. Thresholds: ≥0.25 → same/high, ≥0.15 → same/medium, ≥0.10 → different/low, <0.10 → different/high.
+`SalamanderVerifier._patch_match_score()` builds a cosine similarity matrix across the **foreground** patch pairs (background patches are dropped via `SalamanderEmbedder._foreground_mask` — achromatic white/grey-150/black patches), keeps only mutual nearest neighbors, then scores as `(match_ratio) × (mean_similarity)`, where `match_ratio` is normalized by the smaller foreground set (symmetric). Thresholds (calibrated on `docs/images/`, see `poc/ALGORITHM_CHANGELOG.md` v2): ≥0.55 → same/high, ≥0.50 → same/medium, ≥0.40 → different/low, <0.40 → different/high. Re-tune with `poc/eval_identification.py` as the labelled set grows.
 
 ### Environment variables
 

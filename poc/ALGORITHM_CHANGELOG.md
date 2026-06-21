@@ -138,10 +138,52 @@ L'algorithme de base (v0) détecte correctement les similarités visuelles, mais
 
 ---
 
+## v2 - Masquage du premier plan + normalisation symétrique (2026-06-21)
+
+**Contexte**: Trop de faux positifs en production. Nouveau jeu labellisé propre
+dans `docs/images/<idN>/` (14 individus, 49 paires same / 897 paires different
+après dédoublonnage). Harnais d'évaluation: `poc/eval_identification.py`.
+
+**Diagnostic**:
+1. **Seuils déréglés** (cause principale): l'algo v0 classait `is_same` dès
+   score ≥ 0.15, alors que les individus *différents* scorent ~0.30 en moyenne
+   → 98 % des paires différentes franchissaient le seuil.
+2. **Le fond polluait le matching**: patchs de fond achromatiques (blanc, gris
+   150 du segmenter, padding noir) créaient de fausses correspondances entre
+   individus différents.
+
+**Changements** (`embedder.py`, `verifier.py`):
+- `extract_features()` retourne désormais un masque de premier plan par patch.
+  Un patch est *fond* s'il est achromatique (saturation < 28) ET clair
+  (luminosité > 110, gris/blanc) ou quasi-noir (< 18, padding). Background-
+  agnostique → robuste au gris-150 produit en production par le segmenter.
+- `_patch_match_score()` ignore les patchs de fond et normalise le match_ratio
+  par le **plus petit** ensemble de patchs premier plan (symétrique) au lieu de
+  `len(patches1)`. Repli automatique sur tous les patchs si un masque est vide.
+- Seuils recalibrés: high=0.55, medium=0.50 (frontière `is_same`), low=0.40.
+
+**Résultats** (jeu propre, 14 individus):
+| Métrique | v0 | v2 (fg_sym) |
+|----------|-----|-------------|
+| AUC-ROC | 0.794 | **0.882** |
+| Gap moyen same-diff | +0.154 | **+0.174** |
+| Précision @ seuil 0.50 | — | **80 %** (rappel 33 %) |
+| Précision @ seuil 0.55 | — | **~100 %** (rappel 25 %) |
+
+**Limites connues**: rappel modeste (~30 % au seuil retenu) — la frontière
+0.40–0.50 est exposée en confiance "low" pour revue humaine. Petit échantillon
+(49 paires same): re-calibrer les seuils via le harnais quand le jeu grossit.
+
+**Piste suivante**: fine-tuner DINOv2 sur les individus (gain majeur attendu).
+Optionnel: appliquer le masque aussi au pooling GeM de `/embed` pour améliorer
+le rappel grossier pgvector (⚠️ nécessite de ré-embedder les photos stockées).
+
+---
+
 ## Statut actuel
 
-- **Algorithme en production**: v0 (mutual nearest neighbor)
-- **Performance sur dataset actuel**: 21.4% accuracy (mais dataset suspect)
-- **Performance estimée sur données propres**: À déterminer avec meilleur ground truth
+- **Algorithme en production**: v2 (foreground-masked mutual NN, normalisation symétrique)
+- **Performance sur jeu propre (14 individus)**: AUC 0.882, précision 80 % @ 0.50
+- **Harnais de calibration**: `./venv/bin/python poc/eval_identification.py`
 
 ---
