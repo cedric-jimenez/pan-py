@@ -8,8 +8,8 @@ A FastAPI microservice for salamander detection and individual identification, d
 
 1. **Detect** (`POST /crop-salamander`) — YOLO bounding-box detection → rectangular crop
 2. **Segment** (`POST /segment-salamander`) — YOLO-seg instance segmentation → mask-based crop with background replacement
-3. **Embed** (`POST /embed`) — DINOv2 GeM-pooled patch tokens → 384-dim normalized vector for vector DB storage
-4. **Verify** (`POST /identify`) — Patch-level mutual nearest-neighbor matching → `is_same`/`score`
+3. **Embed** (`POST /embed`) — DINOv2 GeM-pooled patch tokens → 384-dim normalized vector for vector DB storage (coarse retrieval pre-filter)
+4. **Verify** (`POST /verify`) — SIFT keypoints + RANSAC geometric verification of the spot pattern → `is_same`/`score`
 
 ## Commands
 
@@ -63,7 +63,7 @@ app/
     segmenter.py      # SalamanderSegmenter — wraps segment.pt, applies cv2 mask
   identification/
     embedder.py       # SalamanderEmbedder — DINOv2 vits14, GeM pooling, _ResizePad
-    verifier.py       # SalamanderVerifier — patch-level MNN matching, classify()
+    verifier.py       # SalamanderVerifier — SIFT + RANSAC geometric matching, classify()
 ```
 
 ### Startup
@@ -77,11 +77,13 @@ app/
 - `SalamanderDetector` reads `YOLO_MODEL_PATH` env var (default: `models/crop.pt`)
 - `SalamanderSegmenter` reads `YOLO_SEGMENT_MODEL_PATH` env var (default: `models/segment.pt`)
 
-### DINOv2 identification design
+### Identification design (two stages)
 
-The embedder uses **GeM-pooled patch tokens** (not the CLS token). The CLS token only captures species-level similarity (all fire salamanders score ~0.92); patch tokens encode local spot/color patterns that distinguish individuals.
+**Retrieval (coarse, `/embed` + pgvector).** The embedder produces a 384-dim vector from DINOv2 **GeM-pooled patch tokens** (not the CLS token, which only captures species-level similarity — all fire salamanders score ~0.92). Stored in pgvector; the caller retrieves the top-K nearest as candidates.
 
-`SalamanderVerifier._patch_match_score()` builds a cosine similarity matrix across the **foreground** patch pairs (background patches are dropped via `SalamanderEmbedder._foreground_mask` — achromatic white/grey-150/black patches), keeps only mutual nearest neighbors, then scores as `(match_ratio) × (mean_similarity)`, where `match_ratio` is normalized by the smaller foreground set (symmetric). Thresholds (calibrated on `docs/images/`, see `poc/ALGORITHM_CHANGELOG.md` v2): ≥0.55 → same/high, ≥0.50 → same/medium, ≥0.40 → different/low, <0.40 → different/high. Re-tune with `poc/eval_identification.py` as the labelled set grows.
+**Verification (fine, `/verify`).** `SalamanderVerifier` matches the **geometry** of the yellow spot pattern with **SIFT keypoints + RANSAC**: detect SIFT on the resize-padded greyscale image, match with a Lowe ratio test (0.75), then `cv2.findHomography(..., RANSAC)` keeps only spatially consistent correspondences. Score = `inliers / min(#keypoints)`. Different individuals share almost no consistent keypoints, so this separates cleanly. Thresholds (calibrated on `docs/images/`, see `poc/ALGORITHM_CHANGELOG.md` v3): ≥0.15 → same/high, ≥0.08 → same/medium, ≥0.05 → different/low, <0.05 → different/high. Benchmark vs the old DINOv2 patch score with `poc/benchmark_methods.py`; re-tune as the labelled set grows.
+
+This replaced a DINOv2 patch mutual-nearest-neighbor score (v1/v2) that captured generic appearance rather than individual spot geometry and produced many false positives. The verifier no longer needs DINOv2 (so `/verify` is fast and independent of the embedder warmup); DINOv2 is still used for `/embed` retrieval.
 
 ### Environment variables
 

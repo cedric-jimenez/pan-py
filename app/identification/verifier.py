@@ -1,28 +1,44 @@
-"""DINOv2 patch-level verifier for salamander identification.
+"""SIFT + RANSAC verifier for salamander individual identification.
 
-Uses mutual nearest neighbor matching on DINOv2 patch tokens to compare
-individual spot patterns. This is far more discriminative than global
-cosine similarity (CLS token) which only captures species-level features.
+Identifies individuals by the *geometry* of their yellow spot pattern, which is
+an individual fingerprint. SIFT keypoints are detected on the high-contrast
+pattern, matched with a Lowe ratio test, then RANSAC keeps only the spatially
+consistent correspondences. Different individuals share almost no consistent
+keypoints, so the RANSAC inlier ratio cleanly separates same from different.
+
+This replaces the earlier DINOv2 patch-matching score, which captured generic
+appearance ("a fire salamander") rather than individual spot geometry and so
+produced many false positives. On the labelled set (docs/images/, 14
+individuals) SIFT+RANSAC reaches 100% precision at the is_same threshold with
+~80% recall and 97.7% top-1 retrieval, versus ~80%/33% for the patch score.
+See poc/benchmark_methods.py for the comparison.
 """
 
 import logging
 from typing import TypedDict
 
+import cv2
 import numpy as np
 from PIL import Image
-
-from app.identification.embedder import SalamanderEmbedder
 
 logger = logging.getLogger(__name__)
 
 
-# Default thresholds for patch matching score.
-# Calibrated on the labelled set in docs/images/ (14 individuals, foreground-
-# masked symmetric scoring): same-individual pairs mean ~0.48, different ~0.30.
-# A pair is judged "same" only at >= medium. See poc/eval_identification.py.
-DEFAULT_HIGH_THRESHOLD = 0.55  # confident same (~100% precision on the eval set)
-DEFAULT_MEDIUM_THRESHOLD = 0.50  # is_same=True boundary
-DEFAULT_LOW_THRESHOLD = 0.40  # below this: confidently different
+# Thresholds on the RANSAC inlier ratio: inliers / min(#keypoints of the pair).
+# Calibrated on docs/images/ (14 individuals): same-individual median ~0.31,
+# different-individual max ~0.06. See poc/benchmark_methods.py.
+DEFAULT_HIGH_THRESHOLD = 0.15  # very confident same
+DEFAULT_MEDIUM_THRESHOLD = 0.08  # is_same=True boundary (100% precision, ~80% recall)
+DEFAULT_LOW_THRESHOLD = 0.05  # below this: confidently different
+
+# SIFT / matching parameters.
+_IMAGE_SIZE = 224  # resize-pad target (matches the embedder geometry)
+_LOWE_RATIO = 0.75  # second-nearest-neighbour ratio test
+_RANSAC_REPROJ_THRESHOLD = 5.0  # pixels, for cv2.findHomography
+_MIN_MATCHES = 4  # cv2.findHomography needs at least 4 correspondences
+
+# A SIFT feature set: (keypoint coordinates (N,2), descriptors (N,128) or None).
+_SiftFeatures = tuple[np.ndarray, "np.ndarray | None"]
 
 
 class _VerifyResult(TypedDict):
@@ -36,18 +52,16 @@ class _VerifyResult(TypedDict):
 
 
 class SalamanderVerifier:
-    """Verifies if two salamander images are the same individual.
+    """Verifies whether two salamander images show the same individual.
 
-    Uses DINOv2 patch-level mutual nearest neighbor matching.
-    Each image is split into ~256 patches (16x16 grid at 224px / 14px patch size).
-    Patches that are mutual best matches between the two images form
-    correspondences — the ratio and quality of these correspondences
-    determines whether the spot patterns match.
+    Uses SIFT keypoint matching with RANSAC geometric verification on the spot
+    pattern. The score is the fraction of keypoints that form geometrically
+    consistent correspondences between the two images.
     """
 
     def __init__(
         self,
-        embedder: SalamanderEmbedder,
+        embedder: object | None = None,
         high_threshold: float = DEFAULT_HIGH_THRESHOLD,
         medium_threshold: float = DEFAULT_MEDIUM_THRESHOLD,
         low_threshold: float = DEFAULT_LOW_THRESHOLD,
@@ -55,26 +69,23 @@ class SalamanderVerifier:
         """Initialize the verifier.
 
         Args:
-            embedder: A loaded SalamanderEmbedder instance.
-            high_threshold: Patch score above this → is_same=True, confidence=high.
-            medium_threshold: Patch score above this → is_same=True, confidence=medium.
-            low_threshold: Patch score above this → is_same=False, confidence=low.
-                           Below this → is_same=False, confidence=high.
+            embedder: Deprecated and unused — kept so existing construction
+                (``SalamanderVerifier(embedder=...)``) keeps working. SIFT
+                matching needs no neural model.
+            high_threshold: Inlier ratio above this → is_same=True, confidence=high.
+            medium_threshold: Inlier ratio above this → is_same=True, confidence=medium.
+            low_threshold: Inlier ratio above this (but below medium) → is_same=False,
+                confidence=low. Below this → is_same=False, confidence=high.
         """
-        self.embedder = embedder
+        del embedder  # intentionally unused
         self.high_threshold = high_threshold
         self.medium_threshold = medium_threshold
         self.low_threshold = low_threshold
+        self._sift = cv2.SIFT_create()  # type: ignore[attr-defined]
+        self._matcher = cv2.BFMatcher(cv2.NORM_L2)
 
     def _classify(self, score: float) -> tuple[bool, str]:
-        """Classify a patch matching score into a decision.
-
-        Args:
-            score: Patch matching score (0 to 1).
-
-        Returns:
-            Tuple of (is_same, confidence).
-        """
+        """Classify an inlier-ratio score into a (is_same, confidence) decision."""
         if score >= self.high_threshold:
             return True, "high"
         if score >= self.medium_threshold:
@@ -83,98 +94,73 @@ class SalamanderVerifier:
             return False, "low"
         return False, "high"
 
-    @staticmethod
-    def _patch_match_score(
-        patches1: np.ndarray,
-        patches2: np.ndarray,
-        fg_mask1: np.ndarray | None = None,
-        fg_mask2: np.ndarray | None = None,
-    ) -> float:
-        """Compute patch-level matching score using mutual nearest neighbors.
+    def _extract(self, image: Image.Image) -> _SiftFeatures:
+        """Detect SIFT keypoints on the resize-padded greyscale image.
 
-        For each patch in image1, finds the best match in image2 (and vice versa).
-        Only mutual best matches count — this filters out ambiguous correspondences
-        (e.g. generic black/yellow patches that match many locations).
-
-        Background patches are dropped first (via the foreground masks) so that
-        shared backgrounds — white crops, grey-150 segmenter fill, black padding —
-        can't manufacture matches between different individuals. The match ratio
-        is normalized by the *smaller* foreground set (symmetric), so a larger
-        image cannot dilute the score.
-
-        Score = (n_mutual_matches / min(N_fg, M_fg)) * mean_similarity_of_matches
-
-        Args:
-            patches1: L2-normalized patch tokens from image 1, shape (N, D).
-            patches2: L2-normalized patch tokens from image 2, shape (M, D).
-            fg_mask1: Optional (N,) bool foreground mask for image 1.
-            fg_mask2: Optional (M,) bool foreground mask for image 2.
-
-        Returns:
-            Matching score between 0 and 1.
+        Background (uniform white/grey/black) produces no keypoints, so SIFT
+        naturally concentrates on the salamander's spot edges.
         """
-        # Restrict to foreground patches when masks are available and non-empty;
-        # fall back to all patches otherwise so the score is never degenerate.
-        if fg_mask1 is not None and fg_mask1.any():
-            patches1 = patches1[fg_mask1]
-        if fg_mask2 is not None and fg_mask2.any():
-            patches2 = patches2[fg_mask2]
+        rgb = image.convert("RGB")
+        w, h = rgb.size
+        scale = _IMAGE_SIZE / max(w, h)
+        new_w, new_h = max(int(w * scale), 1), max(int(h * scale), 1)
+        canvas = Image.new("RGB", (_IMAGE_SIZE, _IMAGE_SIZE), (0, 0, 0))
+        canvas.paste(
+            rgb.resize((new_w, new_h)), ((_IMAGE_SIZE - new_w) // 2, (_IMAGE_SIZE - new_h) // 2)
+        )
 
-        if len(patches1) == 0 or len(patches2) == 0:
-            return 0.0
+        gray = cv2.cvtColor(np.asarray(canvas), cv2.COLOR_RGB2GRAY)
+        keypoints, descriptors = self._sift.detectAndCompute(gray, None)
+        pts = (
+            np.array([kp.pt for kp in keypoints], dtype=np.float32)
+            if keypoints
+            else np.zeros((0, 2), dtype=np.float32)
+        )
+        return pts, descriptors
 
-        # Cosine similarity matrix between all patch pairs
-        sim_matrix = patches1 @ patches2.T  # (N, M)
+    def _match_score(self, a: _SiftFeatures, b: _SiftFeatures) -> tuple[float, int, int]:
+        """Score a pair via Lowe-ratio matching + RANSAC geometric verification.
 
-        # Best match in each direction
-        nn_1to2 = sim_matrix.argmax(axis=1)  # (N,)
-        nn_2to1 = sim_matrix.argmax(axis=0)  # (M,)
-
-        # Keep only mutual nearest neighbors (vectorized)
-        indices = np.arange(len(patches1))
-        mutual_mask = nn_2to1[nn_1to2] == indices
-        if not mutual_mask.any():
-            return 0.0
-
-        mutual_sims = sim_matrix[indices[mutual_mask], nn_1to2[mutual_mask]]
-        denom = min(len(patches1), len(patches2))
-        match_ratio = float(mutual_mask.sum()) / denom
-        return match_ratio * float(mutual_sims.mean())
-
-    def verify(
-        self,
-        image1: Image.Image,
-        image2: Image.Image,
-    ) -> dict:
-        """Verify if two images are the same individual.
-
-        Extracts patch tokens from both images and computes a matching
-        score based on mutual nearest neighbor correspondences.
-
-        Args:
-            image1: First PIL Image.
-            image2: Second PIL Image.
-
-        Returns:
-            Dictionary with verification results.
+        Returns (inlier_ratio, n_good_matches, n_inliers).
         """
-        emb1, patches1, fg1 = self.embedder.extract_features(image1)
-        emb2, patches2, fg2 = self.embedder.extract_features(image2)
+        pts_a, des_a = a
+        pts_b, des_b = b
+        if des_a is None or des_b is None or len(des_a) < _MIN_MATCHES or len(des_b) < _MIN_MATCHES:
+            return 0.0, 0, 0
 
-        # Global cosine similarity (for reference / backward compat)
-        cosine_sim = float(np.dot(emb1, emb2))
+        # Lowe ratio test on the two nearest neighbours.
+        knn = self._matcher.knnMatch(des_a, des_b, k=2)
+        good = [
+            pair[0]
+            for pair in knn
+            if len(pair) == 2 and pair[0].distance < _LOWE_RATIO * pair[1].distance
+        ]
+        if len(good) < _MIN_MATCHES:
+            return 0.0, len(good), 0
 
-        # Patch-level matching (main score)
-        score = self._patch_match_score(patches1, patches2, fg1, fg2)
+        # RANSAC: keep only geometrically consistent correspondences.
+        src = np.array([pts_a[m.queryIdx] for m in good], dtype=np.float32)
+        dst = np.array([pts_b[m.trainIdx] for m in good], dtype=np.float32)
+        _, mask = cv2.findHomography(src, dst, cv2.RANSAC, _RANSAC_REPROJ_THRESHOLD)
+        if mask is None:
+            return 0.0, len(good), 0
+
+        inliers = int(mask.sum())
+        denom = min(len(pts_a), len(pts_b))
+        score = inliers / denom if denom else 0.0
+        return score, len(good), inliers
+
+    def verify(self, image1: Image.Image, image2: Image.Image) -> dict:
+        """Verify whether two images show the same individual."""
+        score, matches, inliers = self._match_score(self._extract(image1), self._extract(image2))
         is_same, confidence = self._classify(score)
-
         return {
             "is_same": is_same,
             "score": float(score),
             "confidence": confidence,
-            "cosine_similarity": cosine_sim,
-            "matches": 0,
-            "inliers": 0,
+            "cosine_similarity": 0.0,  # vestigial: kept for API back-compat
+            "matches": matches,
+            "inliers": inliers,
         }
 
     def verify_against_many(
@@ -183,58 +169,31 @@ class SalamanderVerifier:
         candidate_images: list[Image.Image],
         cosine_threshold: float = 0.0,
     ) -> list[_VerifyResult]:
-        """Verify a query image against multiple candidates.
-
-        Extracts query features once, then compares against each candidate
-        using patch-level matching. Candidates whose cosine similarity falls
-        below cosine_threshold are fast-rejected without running patch matching.
+        """Verify a query image against many candidates, sorted by score desc.
 
         Args:
             query_image: Query PIL Image.
-            candidate_images: List of candidate PIL Images.
-            cosine_threshold: Skip patch matching for candidates with cosine
-                similarity below this value (0.0 = disabled).
-
-        Returns:
-            List of verification results, sorted by score descending.
+            candidate_images: Candidate PIL Images.
+            cosine_threshold: Deprecated and ignored (SIFT needs no fast-reject).
         """
+        del cosine_threshold  # intentionally unused
         if not candidate_images:
             return []
 
-        query_emb, query_patches, query_fg = self.embedder.extract_features(query_image)
-
+        query_features = self._extract(query_image)
         results: list[_VerifyResult] = []
         for idx, candidate in enumerate(candidate_images):
-            cand_emb, cand_patches, cand_fg = self.embedder.extract_features(candidate)
-
-            cosine_sim = float(np.dot(query_emb, cand_emb))
-
-            if cosine_sim < cosine_threshold:
-                results.append(
-                    {
-                        "candidate_index": idx,
-                        "is_same": False,
-                        "score": 0.0,
-                        "confidence": "high",
-                        "cosine_similarity": cosine_sim,
-                        "matches": 0,
-                        "inliers": 0,
-                    }
-                )
-                continue
-
-            score = self._patch_match_score(query_patches, cand_patches, query_fg, cand_fg)
+            score, matches, inliers = self._match_score(query_features, self._extract(candidate))
             is_same, confidence = self._classify(score)
-
             results.append(
                 {
                     "candidate_index": idx,
                     "is_same": is_same,
                     "score": float(score),
                     "confidence": confidence,
-                    "cosine_similarity": cosine_sim,
-                    "matches": 0,
-                    "inliers": 0,
+                    "cosine_similarity": 0.0,
+                    "matches": matches,
+                    "inliers": inliers,
                 }
             )
 
