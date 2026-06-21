@@ -72,6 +72,12 @@ async def lifespan(_app: FastAPI):
     logger.info("Loading DINOv2 embedder...")
     embedder = SalamanderEmbedder()
     embedder.load_model()
+    # Prime CPU inference so the first real request isn't 10-60s slow (and thus
+    # timed out by the caller). See SalamanderEmbedder.warmup.
+    logger.info("Warming up DINOv2 inference...")
+    _warmup_start = time.time()
+    embedder.warmup()
+    logger.info(f"DINOv2 warmup complete in {time.time() - _warmup_start:.1f}s")
     logger.info("Initializing DINOv2 verifier...")
     verifier = SalamanderVerifier(embedder=embedder)
     yield

@@ -114,6 +114,24 @@ class SalamanderEmbedder:
         """Check if the model is loaded."""
         return self.model is not None
 
+    def warmup(self) -> None:
+        """Prime CPU inference with a dummy forward pass.
+
+        The first DINOv2 inference after process start is dramatically slow
+        (10s+ for a single image, 60s+ for a multi-image /verify burst) while
+        PyTorch caches oneDNN/MKL primitives for the 224x224 input shape and
+        spins up its thread pool. Loading the weights does NOT prime this.
+
+        Running one inference at startup converts that penalty into a one-off
+        startup cost (hidden behind the container health-check) so the first
+        real request is fast instead of exceeding the caller's timeout. Caches
+        persist for the process lifetime, so a single warmup is enough.
+        """
+        if self.model is None:
+            return
+        dummy = Image.new("RGB", (224, 224), (0, 0, 0))
+        self.extract_features(dummy)
+
     def _prepare_image(self, image: Image.Image) -> Image.Image:
         """Prepare image for embedding extraction.
 

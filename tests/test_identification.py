@@ -104,3 +104,11 @@ def test_foreground_mask_non_square_returns_all_true():
     img = Image.new("RGB", (224, 224), (150, 150, 150))
     mask = SalamanderEmbedder._foreground_mask(img, 255)  # not a perfect square
     assert mask.all()
+
+
+# --- warmup ------------------------------------------------------------------
+def test_warmup_is_noop_when_model_not_loaded():
+    """warmup() must not raise when called before the model is loaded."""
+    embedder = SalamanderEmbedder()
+    assert not embedder.is_model_loaded()
+    embedder.warmup()  # should be a safe no-op
