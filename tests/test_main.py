@@ -1,7 +1,8 @@
 """Tests for the main FastAPI application."""
 
-import pytest
 import warnings
+
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app

@@ -16,10 +16,13 @@ from app.identification.embedder import SalamanderEmbedder
 logger = logging.getLogger(__name__)
 
 
-# Default thresholds for patch matching score
-DEFAULT_HIGH_THRESHOLD = 0.25
-DEFAULT_MEDIUM_THRESHOLD = 0.15
-DEFAULT_LOW_THRESHOLD = 0.10
+# Default thresholds for patch matching score.
+# Calibrated on the labelled set in docs/images/ (14 individuals, foreground-
+# masked symmetric scoring): same-individual pairs mean ~0.48, different ~0.30.
+# A pair is judged "same" only at >= medium. See poc/eval_identification.py.
+DEFAULT_HIGH_THRESHOLD = 0.55  # confident same (~100% precision on the eval set)
+DEFAULT_MEDIUM_THRESHOLD = 0.50  # is_same=True boundary
+DEFAULT_LOW_THRESHOLD = 0.40  # below this: confidently different
 
 
 class _VerifyResult(TypedDict):
@@ -81,22 +84,45 @@ class SalamanderVerifier:
         return False, "high"
 
     @staticmethod
-    def _patch_match_score(patches1: np.ndarray, patches2: np.ndarray) -> float:
+    def _patch_match_score(
+        patches1: np.ndarray,
+        patches2: np.ndarray,
+        fg_mask1: np.ndarray | None = None,
+        fg_mask2: np.ndarray | None = None,
+    ) -> float:
         """Compute patch-level matching score using mutual nearest neighbors.
 
         For each patch in image1, finds the best match in image2 (and vice versa).
         Only mutual best matches count — this filters out ambiguous correspondences
         (e.g. generic black/yellow patches that match many locations).
 
-        Score = (n_mutual_matches / n_patches) * mean_similarity_of_mutual_matches
+        Background patches are dropped first (via the foreground masks) so that
+        shared backgrounds — white crops, grey-150 segmenter fill, black padding —
+        can't manufacture matches between different individuals. The match ratio
+        is normalized by the *smaller* foreground set (symmetric), so a larger
+        image cannot dilute the score.
+
+        Score = (n_mutual_matches / min(N_fg, M_fg)) * mean_similarity_of_matches
 
         Args:
             patches1: L2-normalized patch tokens from image 1, shape (N, D).
             patches2: L2-normalized patch tokens from image 2, shape (M, D).
+            fg_mask1: Optional (N,) bool foreground mask for image 1.
+            fg_mask2: Optional (M,) bool foreground mask for image 2.
 
         Returns:
             Matching score between 0 and 1.
         """
+        # Restrict to foreground patches when masks are available and non-empty;
+        # fall back to all patches otherwise so the score is never degenerate.
+        if fg_mask1 is not None and fg_mask1.any():
+            patches1 = patches1[fg_mask1]
+        if fg_mask2 is not None and fg_mask2.any():
+            patches2 = patches2[fg_mask2]
+
+        if len(patches1) == 0 or len(patches2) == 0:
+            return 0.0
+
         # Cosine similarity matrix between all patch pairs
         sim_matrix = patches1 @ patches2.T  # (N, M)
 
@@ -105,17 +131,14 @@ class SalamanderVerifier:
         nn_2to1 = sim_matrix.argmax(axis=0)  # (M,)
 
         # Keep only mutual nearest neighbors (vectorized)
-        n_patches = len(patches1)
-        if n_patches == 0:
-            return 0.0
-
-        indices = np.arange(n_patches)
+        indices = np.arange(len(patches1))
         mutual_mask = nn_2to1[nn_1to2] == indices
         if not mutual_mask.any():
             return 0.0
 
         mutual_sims = sim_matrix[indices[mutual_mask], nn_1to2[mutual_mask]]
-        match_ratio = float(mutual_mask.sum()) / n_patches
+        denom = min(len(patches1), len(patches2))
+        match_ratio = float(mutual_mask.sum()) / denom
         return match_ratio * float(mutual_sims.mean())
 
     def verify(
@@ -135,14 +158,14 @@ class SalamanderVerifier:
         Returns:
             Dictionary with verification results.
         """
-        emb1, patches1 = self.embedder.extract_features(image1)
-        emb2, patches2 = self.embedder.extract_features(image2)
+        emb1, patches1, fg1 = self.embedder.extract_features(image1)
+        emb2, patches2, fg2 = self.embedder.extract_features(image2)
 
         # Global cosine similarity (for reference / backward compat)
         cosine_sim = float(np.dot(emb1, emb2))
 
         # Patch-level matching (main score)
-        score = self._patch_match_score(patches1, patches2)
+        score = self._patch_match_score(patches1, patches2, fg1, fg2)
         is_same, confidence = self._classify(score)
 
         return {
@@ -178,11 +201,11 @@ class SalamanderVerifier:
         if not candidate_images:
             return []
 
-        query_emb, query_patches = self.embedder.extract_features(query_image)
+        query_emb, query_patches, query_fg = self.embedder.extract_features(query_image)
 
         results: list[_VerifyResult] = []
         for idx, candidate in enumerate(candidate_images):
-            cand_emb, cand_patches = self.embedder.extract_features(candidate)
+            cand_emb, cand_patches, cand_fg = self.embedder.extract_features(candidate)
 
             cosine_sim = float(np.dot(query_emb, cand_emb))
 
@@ -200,7 +223,7 @@ class SalamanderVerifier:
                 )
                 continue
 
-            score = self._patch_match_score(query_patches, cand_patches)
+            score = self._patch_match_score(query_patches, cand_patches, query_fg, cand_fg)
             is_same, confidence = self._classify(score)
 
             results.append(
