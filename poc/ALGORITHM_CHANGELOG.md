@@ -180,10 +180,55 @@ le rappel grossier pgvector (⚠️ nécessite de ré-embedder les photos stock�
 
 ---
 
+## v3 - SIFT + RANSAC (changement de paradigme) (2026-06-21)
+
+**Contexte**: Même après v2 + correction du timeout (warmup DINOv2), un cas réel
+restait faux : le vrai individu scorait 0.489 et un autre 0.505 → mauvais
+classement. Aucun seuil ne corrige ça (le score ne classe pas le bon en tête).
+Recul demandé sur l'algo.
+
+**Diagnostic de fond**: la ré-ID d'individus tachetés est un problème de
+**géométrie** (l'agencement des taches = empreinte). DINOv2 encode l'apparence
+générique ("une salamandre"), et le matching mutual-NN **ignorait la position**
+des patchs → deux individus différents partagent des patchs "tache jaune sur
+noir" qui matchent. Indice : les champs `matches`/`inliers` du verifier, prévus
+pour une vérif géométrique, n'avaient jamais été implémentés.
+
+**Benchmark** (`poc/benchmark_methods.py`, 14 individus, top-1 retrieval + AUC):
+
+| méthode | top-1 | AUC |
+|---------|-------|-----|
+| cosine (retrieval) | 63.6 % | 0.786 |
+| fg_sym (verifier v2) | 70.5 % | 0.882 |
+| combined cos+patch | 81.8 % | 0.872 |
+| patch + RANSAC | 84.1 % | 0.907 |
+| **SIFT + RANSAC** | **97.7 %** | **0.914** |
+
+**Distribution SIFT** (inlier ratio): même individu médiane 0.31 / max 0.60 ;
+individus différents médiane 0.02 / **max 0.06**. → seuil 0.08 = **100 %
+précision, ~80 % rappel** (vs 80 %/33 % pour fg_sym). Validé sur le cas de prod :
+vrai match 0.40 (60 inliers, is_same/high) vs faux positif 0.03 (5 inliers).
+
+**Changements** (`verifier.py`):
+- `SalamanderVerifier` réécrit en **SIFT + Lowe ratio (0.75) + RANSAC homography**.
+  Score = `inliers / min(#keypoints)`. Plus aucune dépendance à DINOv2 → `/verify`
+  rapide et insensible au warmup.
+- Seuils: high=0.15, medium=0.08 (frontière is_same), low=0.05.
+- Contrat d'API inchangé ; `matches`/`inliers` enfin renseignés ; `cosine_similarity`
+  devient vestigial (0.0) ; param `cosine_threshold` ignoré.
+
+**Limites**: petit jeu, photos d'un individu possiblement de la même session
+(re-captures éloignées plus dures → le rappel baissera). Nouveau goulot = le
+retrieval pgvector (top-1 63.6 %) : augmenter le top-K côté Pan. Destination
+long terme inchangée : metric learning / fine-tuning.
+
+---
+
 ## Statut actuel
 
-- **Algorithme en production**: v2 (foreground-masked mutual NN, normalisation symétrique)
-- **Performance sur jeu propre (14 individus)**: AUC 0.882, précision 80 % @ 0.50
-- **Harnais de calibration**: `./venv/bin/python poc/eval_identification.py`
+- **Algorithme en production**: v3 (SIFT + RANSAC sur le motif de taches)
+- **Performance sur jeu propre (14 individus)**: top-1 97.7 %, AUC 0.914, précision 100 % @ 0.08
+- **Benchmark des alternatives**: `./venv/bin/python poc/benchmark_methods.py`
+- **Calibration des seuils**: `./venv/bin/python poc/eval_identification.py`
 
 ---

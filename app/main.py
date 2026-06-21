@@ -78,8 +78,8 @@ async def lifespan(_app: FastAPI):
     _warmup_start = time.time()
     embedder.warmup()
     logger.info(f"DINOv2 warmup complete in {time.time() - _warmup_start:.1f}s")
-    logger.info("Initializing DINOv2 verifier...")
-    verifier = SalamanderVerifier(embedder=embedder)
+    logger.info("Initializing SIFT verifier...")
+    verifier = SalamanderVerifier()
     yield
     # Shutdown: cleanup if needed
     logger.info("Shutting down...")
@@ -557,10 +557,12 @@ async def verify_images(
     ),
 ):
     """
-    Verify if a query image matches any candidate images using DINOv2 patch matching.
+    Verify if a query image matches any candidate images using SIFT + RANSAC.
 
-    Extracts patch tokens from both images and computes a mutual nearest-neighbor
-    matching score. Use this after retrieving candidates from a vector database.
+    Detects SIFT keypoints on each spot pattern, matches them with a Lowe ratio
+    test, and keeps only geometrically consistent correspondences via RANSAC.
+    The score is the inlier ratio. Use this after retrieving candidates from a
+    vector database.
 
     Args:
         query: The query image (new salamander observation)
