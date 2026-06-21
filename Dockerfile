@@ -36,8 +36,9 @@ ENV PORT=8000
 EXPOSE ${PORT}
 
 # Health check (using curl with PORT env variable)
-# Note: start-period=30s to allow time for YOLO models to load (~10-20s)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+# Note: start-period covers YOLO load (~10-20s) + DINOv2 load + inference warmup
+# (a dummy forward pass primes oneDNN caches, ~10-15s) before traffic is routed.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
 # Run the application with JSON logging
