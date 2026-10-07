@@ -224,11 +224,51 @@ long terme inchangée : metric learning / fine-tuning.
 
 ---
 
+## v4 - Plancher sur le NOMBRE d'inliers (is_same)
+
+**Date**: 2026-10-07
+
+**Contexte**: en prod (`/api/photos/[id]/similar`), des individus *différents* de
+la même sortie étaient affichés « Même individu » (confiance medium). Analyse sur
+données réelles (harnais `poc/eval_identification_e2e.py` + les 4 individus
+catalogués de prod) :
+
+- Le score (ratio `inliers / min(#keypoints)`) est **biaisé par le nombre de
+  keypoints** : un crop pauvre gonfle le ratio. Ex. prod : 8 inliers → 0.066 vs
+  9 inliers → 0.055.
+- Le **nombre absolu d'inliers** sépare bien mieux. Distributions :
+
+| jeu | same (inliers) | diff (inliers) | AUC count | AUC ratio |
+|-----|----------------|----------------|-----------|-----------|
+| corpus terrain (5 ind.) | min 6, méd 27, max 83 | **max 10** | **0.977** | 0.959 |
+| docs/images (14 ind.) | méd 57, max 118 | **max 9** | 0.911 | 0.914 |
+| prod (vrais re-captures) | Malone/Titine **24-26** | ≤ 10 | — | — |
+
+→ les individus différents ne dépassent **jamais ~10 inliers** ; un plancher à
+**12** donne **0 faux positif** sur les deux jeux ET la prod.
+
+**Changement** (`verifier.py`): ajout de `DEFAULT_MIN_INLIERS = 12`. `is_same`
+exige désormais `score ≥ medium` **ET** `inliers ≥ 12` ; une paire qui passe la
+bande de ratio mais a trop peu d'inliers est rétrogradée en `(is_same=False,
+"low")`. Contrat d'API inchangé. Côté Pan, `bestExistingMatch` filtre déjà sur
+`is_same`, donc les faux « Même individu » disparaissent et la section affiche
+« Aucune autre photo du même individu trouvée ».
+
+**Limites**: les re-captures à ~2 ans tombent sous le plancher (Louche 752 j →
+8 inliers) ou sont perdues en amont au retrieval cosinus (Diplodocus, Tom →
+hors top-100). Le plancher ne les régresse pas (elles échouent déjà), mais le
+**rappel longue-distance** reste un chantier séparé (meilleur embedding / pool
+plus large). Le remplacement de l'idée abandonnée « baisser medium à 0.06 »
+(précision en baisse) par ce plancher est volontaire.
+
+---
+
 ## Statut actuel
 
-- **Algorithme en production**: v3 (SIFT + RANSAC sur le motif de taches)
-- **Performance sur jeu propre (14 individus)**: top-1 97.7 %, AUC 0.914, précision 100 % @ 0.08
+- **Algorithme en production**: v4 (SIFT + RANSAC + plancher d'inliers ≥ 12)
+- **Performance sur jeu propre (14 individus)**: top-1 ~97 %, AUC 0.914, 0 faux positif @ inliers ≥ 12
 - **Benchmark des alternatives**: `./venv/bin/python poc/benchmark_methods.py`
-- **Calibration des seuils**: `./venv/bin/python poc/eval_identification.py`
+- **Éval bout-en-bout + balayage seuil/plancher**: `./venv/bin/python poc/eval_identification_e2e.py --dataset <dir> [--segment]`
+- **Calibration des seuils (vérifieur seul)**: `./venv/bin/python poc/eval_identification.py`
 
 ---
