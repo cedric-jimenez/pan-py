@@ -177,17 +177,22 @@ def retrieval_metrics(samples: list[Sample], ks: list[int]) -> dict:
 # Stage 3 — verify discrimination + end-to-end identification
 # ---------------------------------------------------------------------------
 def verify_pair_metrics(samples: list[Sample], verifier: SalamanderVerifier) -> dict:
-    """All unordered pairs: same/diff verify-score separation."""
-    pos, neg = [], []
-    worst_fp: list[tuple[float, str, str]] = []
+    """All unordered pairs: same/diff separation on BOTH score and inlier count."""
+    pos, neg = [], []  # scores
+    pos_inl, neg_inl = [], []  # inlier counts
+    worst_fp: list[tuple[float, int, str, str]] = []
     for i, j in itertools.combinations(range(len(samples)), 2):
-        score = verifier.verify(samples[i].image, samples[j].image)["score"]
+        v = verifier.verify(samples[i].image, samples[j].image)
+        score, inliers = v["score"], v["inliers"]
         if samples[i].label == samples[j].label:
             pos.append(score)
+            pos_inl.append(inliers)
         else:
             neg.append(score)
-            worst_fp.append((score, samples[i].label, samples[j].label))
+            neg_inl.append(inliers)
+            worst_fp.append((score, inliers, samples[i].label, samples[j].label))
     pos_a, neg_a = np.array(pos), np.array(neg)
+    pos_i, neg_i = np.array(pos_inl), np.array(neg_inl)
     thr, acc = best_threshold(pos_a, neg_a)
     prod_thr = verifier.high_threshold
     worst_fp.sort(reverse=True)
@@ -196,14 +201,38 @@ def verify_pair_metrics(samples: list[Sample], verifier: SalamanderVerifier) -> 
         "n_diff": int(neg_a.size),
         "same": _dist(pos_a),
         "diff": _dist(neg_a),
+        "same_inliers": _dist(pos_i),
+        "diff_inliers": _dist(neg_i),
+        "same_scores": pos_a.tolist(),
+        "diff_scores": neg_a.tolist(),
+        "same_inlier_counts": pos_i.tolist(),
+        "diff_inlier_counts": neg_i.tolist(),
         "auc_roc": auc_roc(pos_a, neg_a),
+        "auc_roc_inliers": auc_roc(pos_i, neg_i),
         "best_threshold": {"thr": thr, "accuracy": acc},
         "prod_threshold": prod_thr,
         "false_positives_at_prod": int((neg_a >= prod_thr).sum()),
         "top_false_positives": [
-            {"score": round(s, 3), "a": a, "b": b} for s, a, b in worst_fp[:5]
+            {"score": round(s, 3), "inliers": inl, "a": a, "b": b}
+            for s, inl, a, b in worst_fp[:5]
         ],
     }
+
+
+def inlier_floor_sweep(ver: dict, floors: list[int]) -> list[dict]:
+    """For each candidate inlier floor: same-pairs kept (recall) vs diff-pairs
+    that still pass (false positives). Isolates inlier count as a gate."""
+    same = np.array(ver["same_inlier_counts"])
+    diff = np.array(ver["diff_inlier_counts"])
+    rows = []
+    for f in floors:
+        rows.append({
+            "floor": f,
+            "same_kept": float((same >= f).sum() / same.size) if same.size else float("nan"),
+            "diff_pass": int((diff >= f).sum()),
+            "n_diff": int(diff.size),
+        })
+    return rows
 
 
 def e2e_metrics(samples: list[Sample], verifier: SalamanderVerifier, topn: int) -> dict:
@@ -224,6 +253,7 @@ def e2e_metrics(samples: list[Sample], verifier: SalamanderVerifier, topn: int) 
     prod_thr = verifier.high_threshold
 
     n = cos_ok = ver_ok = ver_thr_ok = 0
+    per_query: list[dict] = []  # {"correct": bool, "score": float} for the verify top-1
     for i, lbl in enumerate(labels):
         if counts[lbl] < 2:
             continue
@@ -235,7 +265,9 @@ def e2e_metrics(samples: list[Sample], verifier: SalamanderVerifier, topn: int) 
         verdicts = verifier.verify_against_many(samples[i].image, [samples[j].image for j in pool])
         best = verdicts[0]  # sorted by score desc
         best_j = pool[best["candidate_index"]]
-        if labels[best_j] == lbl:
+        correct = labels[best_j] == lbl
+        per_query.append({"correct": correct, "score": float(best["score"])})
+        if correct:
             ver_ok += 1
             if best["score"] >= prod_thr:
                 ver_thr_ok += 1
@@ -245,7 +277,34 @@ def e2e_metrics(samples: list[Sample], verifier: SalamanderVerifier, topn: int) 
         "cosine_top1_accuracy": cos_ok / n if n else float("nan"),
         "verify_top1_accuracy": ver_ok / n if n else float("nan"),
         "verify_top1_thresholded_accuracy": ver_thr_ok / n if n else float("nan"),
+        "per_query": per_query,
     }
+
+
+def threshold_sweep(ver: dict, e2e: dict, thresholds: list[float]) -> list[dict]:
+    """Per-threshold tradeoff at the is_same boundary: recall, FP, end-to-end ID.
+
+    For each candidate is_same threshold T:
+      - verify_recall  = fraction of same-pairs scoring >= T   (true matches kept)
+      - false_positives = diff-pairs scoring >= T              (imposters let in)
+      - e2e_identified = queries whose verify top-1 is the right individual AND
+                         scores >= T (i.e. actually surfaced as "same" in prod)
+    """
+    same = np.array(ver["same_scores"])
+    diff = np.array(ver["diff_scores"])
+    pq = e2e["per_query"]
+    n_same, n_diff, n_q = same.size, diff.size, len(pq)
+    rows = []
+    for t in thresholds:
+        identified = sum(1 for q in pq if q["correct"] and q["score"] >= t)
+        rows.append({
+            "threshold": t,
+            "verify_recall": float((same >= t).sum() / n_same) if n_same else float("nan"),
+            "false_positives": int((diff >= t).sum()),
+            "n_diff": n_diff,
+            "e2e_identified_accuracy": identified / n_q if n_q else float("nan"),
+        })
+    return rows
 
 
 def _dist(a: np.ndarray) -> dict:
@@ -263,7 +322,7 @@ def _dist(a: np.ndarray) -> dict:
 # Report
 # ---------------------------------------------------------------------------
 def print_report(ds: Path, stats: PipelineStats, per_ind: dict, retr: dict,
-                 ver: dict, e2e: dict) -> None:
+                 ver: dict, e2e: dict, sweep: list[dict], inl_sweep: list[dict]) -> None:
     print(f"\n{'=' * 70}\nIDENTIFICATION — END-TO-END EVAL\n{'=' * 70}")
     print(f"dataset: {ds}")
     print(f"individuals: {len(per_ind)}  |  photos: {stats.total}  |  "
@@ -297,13 +356,31 @@ def print_report(ds: Path, stats: PipelineStats, per_ind: dict, retr: dict,
     if ver["top_false_positives"]:
         print("  worst diff-pair scores (would be false matches):")
         for fp in ver["top_false_positives"]:
-            print(f"    {fp['score']:.3f}  {fp['a']} vs {fp['b']}")
+            print(f"    score={fp['score']:.3f} inliers={fp['inliers']:>2}  {fp['a']} vs {fp['b']}")
+
+    print("\n[3b] INLIER COUNT as the discriminator (prod data suggests count > ratio)")
+    print(f"  same pairs inliers: {ver['same_inliers']}")
+    print(f"  diff pairs inliers: {ver['diff_inliers']}")
+    print(f"  AUC-ROC on inlier count: {ver['auc_roc_inliers']:.3f}  "
+          f"(vs {ver['auc_roc']:.3f} on ratio score)")
+    print(f"  {'floor':>6} {'same_kept(recall)':>18} {'diff_pass(FP)':>16}")
+    for row in inl_sweep:
+        print(f"  {row['floor']:>6} {row['same_kept']:>17.0%} "
+              f"{row['diff_pass']:>10}/{row['n_diff']:<4}")
 
     print(f"\n[4] END-TO-END IDENTIFICATION (mirrors /similar, pool=top-{e2e['topn_pool']}, "
           f"n={e2e['n_queries']})")
     print(f"  cosine-only     top-1 accuracy: {e2e['cosine_top1_accuracy']:.1%}")
-    print(f"  +verify re-rank top-1 accuracy: {e2e['verify_top1_accuracy']:.1%}")
-    print(f"  +verify, thresholded (prod)   : {e2e['verify_top1_thresholded_accuracy']:.1%}")
+    print(f"  +verify re-rank top-1 accuracy: {e2e['verify_top1_accuracy']:.1%}  (no threshold)")
+
+    print("\n[5] is_same THRESHOLD SWEEP (the knob that decides 'same individual')")
+    print("    Pan surfaces a match when is_same=True, i.e. verify score >= medium_threshold.")
+    print(f"    {'thr':>6} {'verify_recall':>14} {'false_pos':>12} {'e2e_identified':>15}")
+    for row in sweep:
+        print(f"    {row['threshold']:>6.3f} "
+              f"{row['verify_recall']:>13.0%} "
+              f"{row['false_positives']:>7}/{row['n_diff']:<4} "
+              f"{row['e2e_identified_accuracy']:>14.0%}")
     print(f"{'=' * 70}\n")
 
 
@@ -344,14 +421,21 @@ def main() -> None:
     retr = retrieval_metrics(samples, ks)
     ver = verify_pair_metrics(samples, verifier)
     e2e = e2e_metrics(samples, verifier, min(args.topn, len(samples) - 1))
+    sweep = threshold_sweep(ver, e2e, [0.05, 0.06, 0.07, 0.08, 0.10, 0.15])
+    inl_sweep = inlier_floor_sweep(ver, [6, 8, 10, 12, 15, 20])
 
-    print_report(root, stats, per_ind, retr, ver, e2e)
+    print_report(root, stats, per_ind, retr, ver, e2e, sweep, inl_sweep)
 
     if args.json:
+        # Drop the bulky raw score arrays from the JSON dump.
+        drop = ("same_scores", "diff_scores", "same_inlier_counts", "diff_inlier_counts")
+        ver_out = {k: v for k, v in ver.items() if k not in drop}
+        e2e_out = {k: v for k, v in e2e.items() if k != "per_query"}
         args.json.write_text(json.dumps(
             {"dataset": str(root), "per_individual": per_ind,
              "detection": {"total": stats.total, "undetected": stats.undetected},
-             "retrieval": retr, "verify": ver, "end_to_end": e2e}, indent=2))
+             "retrieval": retr, "verify": ver_out, "end_to_end": e2e_out,
+             "threshold_sweep": sweep, "inlier_floor_sweep": inl_sweep}, indent=2))
         print(f"Wrote {args.json}")
 
 
