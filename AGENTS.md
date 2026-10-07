@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Two independently-versioned git repos forming one salamander ID app. **This root is not a git repo.**
+Two independently-versioned git repos forming one salamander ID app, sitting side by side inside a parent workspace directory that is **not** itself a git repo. This file lives in `pan-py/`; the paths below are relative to that **workspace root** (the parent of this repo), so `pan-py/` is this repo and `Pan/` is its sibling one level up.
 
 | Repo | Role | Run commands in | Read its CLAUDE.md first |
 |---|---|---|---|
@@ -28,4 +28,4 @@ Two independently-versioned git repos forming one salamander ID app. **This root
 - pan-py monkey-patches `torch.load` with `weights_only=False` in `YOLOModelBase` for PyTorch 2.6+ compatibility.
 - pan-py uses `asyncio_mode = "auto"` in pytest — no `@pytest.mark.asyncio` decorator needed.
 - CI for Pan runs `lint → test (--run) → type-check (--skipLibCheck, non-blocking) → build`.
-- pan-py models (`.pt` files) are committed to git (under 10 MB for pre-commit).
+- pan-py models are committed to git: `crop.pt` (~6 MB) and `segment.pt` (~60 MB). The pre-commit `check-added-large-files` hook caps *newly added* files at 10 MB (`--maxkb=10000`); `segment.pt` exceeds that and was committed with the hook bypassed, so don't assume every `.pt` is under 10 MB.
