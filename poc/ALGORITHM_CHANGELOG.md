@@ -224,14 +224,50 @@ long terme inchangée : metric learning / fine-tuning.
 
 ---
 
-## v4 - Plancher sur le NOMBRE d'inliers (is_same)
+## v4 - Seuil is_same 0.08 → 0.06
 
 **Date**: 2026-10-07
 
-**Contexte**: en prod (`/api/photos/[id]/similar`), des individus *différents* de
-la même sortie étaient affichés « Même individu » (confiance medium). Analyse sur
-données réelles (harnais `poc/eval_identification_e2e.py` + les 4 individus
-catalogués de prod) :
+**Contexte**: éval bout-en-bout de la chaîne complète (segment → embed → verify)
+via `poc/eval_identification_e2e.py`, sur **deux** jeux : `docs/images` (14
+individus, croppés) et le corpus terrain brut `Echantillons/.../par-individu`
+(5 individus, multi-session). Objectif : chiffrer pourquoi l'identification
+paraît approximative sur photos terrain.
+
+**Constat clé**: la frontière `is_same` *opérante* est **medium**, pas high —
+`/verify` renvoie `is_same=True` dès medium, et côté Pan `bestExistingMatch`
+(`lib/identify-suggestion.ts`) ne filtre que sur `is_same`. Le label high (0.15)
+est purement cosmétique. Le vérifieur lui-même est excellent (AUC 0.91–0.96,
+**0 faux positif** sur 964 paires d'individus différents, qui plafonnent à 0.06).
+
+**Balayage du seuil is_same** (recall / faux positifs / identification e2e) :
+
+| seuil | docs/images | corpus terrain |
+|-------|-------------|----------------|
+| 0.05 | 82 % / **3 FP** / 86 % | 64 % / **1 FP** / 85 % |
+| **0.06** | 82 % / 0 FP / 86 % | 64 % / 0 FP / **77 %** |
+| 0.08 (ancien) | 80 % / 0 FP / 86 % | 55 % / 0 FP / 69 % |
+| 0.15 | 67 % / 0 FP / 82 % | 27 % / 0 FP / 46 % |
+
+**Changement** (`verifier.py`): `DEFAULT_MEDIUM_THRESHOLD` 0.08 → **0.06**.
+0.06 reste juste au-dessus du plafond des paires-différentes (0.06) → précision
+toujours 100 % sur 964 paires, tout en remontant le rappel terrain (identification
+e2e 69 % → 77 %). 0.05 est écarté (fait apparaître des faux positifs).
+
+**Limites**: petits jeux (5 et 14 individus) → le rappel a de larges barres
+d'erreur ; la marge au-dessus du max diff (0.06) est fine et montera avec un
+catalogue plus gros → re-calibrer à mesure que le set labellisé grandit.
+
+---
+
+## v5 - Plancher sur le NOMBRE d'inliers (is_same)
+
+**Date**: 2026-10-07
+
+**Contexte**: même après v4 (medium 0.06), la prod (`/api/photos/[id]/similar`)
+affichait encore des individus *différents* de la même sortie comme « Même
+individu » (medium). Analyse sur données réelles (harnais
+`poc/eval_identification_e2e.py` + les individus catalogués de prod) :
 
 - Le score (ratio `inliers / min(#keypoints)`) est **biaisé par le nombre de
   keypoints** : un crop pauvre gonfle le ratio. Ex. prod : 8 inliers → 0.066 vs
@@ -248,25 +284,27 @@ catalogués de prod) :
 **12** donne **0 faux positif** sur les deux jeux ET la prod.
 
 **Changement** (`verifier.py`): ajout de `DEFAULT_MIN_INLIERS = 12`. `is_same`
-exige désormais `score ≥ medium` **ET** `inliers ≥ 12` ; une paire qui passe la
-bande de ratio mais a trop peu d'inliers est rétrogradée en `(is_same=False,
-"low")`. Contrat d'API inchangé. Côté Pan, `bestExistingMatch` filtre déjà sur
-`is_same`, donc les faux « Même individu » disparaissent et la section affiche
-« Aucune autre photo du même individu trouvée ».
+exige désormais `score ≥ medium` (0.06) **ET** `inliers ≥ 12` ; une paire qui
+passe la bande de ratio mais a trop peu d'inliers est rétrogradée en
+`(is_same=False, "low")`. Le plancher domine (aucune paire d'individus
+différents n'atteint 12 inliers), donc la valeur exacte de medium (0.06 de v4)
+n'a plus d'effet sur la précision. Contrat d'API inchangé. Côté Pan,
+`bestExistingMatch` filtre déjà sur `is_same`, donc les faux « Même individu »
+disparaissent et la section affiche « Aucune autre photo du même individu trouvée ».
 
 **Limites**: les re-captures à ~2 ans tombent sous le plancher (Louche 752 j →
 8 inliers) ou sont perdues en amont au retrieval cosinus (Diplodocus, Tom →
 hors top-100). Le plancher ne les régresse pas (elles échouent déjà), mais le
 **rappel longue-distance** reste un chantier séparé (meilleur embedding / pool
-plus large). Le remplacement de l'idée abandonnée « baisser medium à 0.06 »
-(précision en baisse) par ce plancher est volontaire.
+plus large).
 
 ---
 
 ## Statut actuel
 
-- **Algorithme en production**: v4 (SIFT + RANSAC + plancher d'inliers ≥ 12)
-- **Performance sur jeu propre (14 individus)**: top-1 ~97 %, AUC 0.914, 0 faux positif @ inliers ≥ 12
+- **Algorithme en production**: v5 (SIFT + RANSAC, medium 0.06 + plancher d'inliers ≥ 12)
+- **Performance jeu propre (14 individus)**: top-1 ~97 %, AUC 0.914, 0 faux positif @ inliers ≥ 12
+- **Performance terrain (corpus, 5 individus)**: identification e2e 77 %, 0 faux positif
 - **Benchmark des alternatives**: `./venv/bin/python poc/benchmark_methods.py`
 - **Éval bout-en-bout + balayage seuil/plancher**: `./venv/bin/python poc/eval_identification_e2e.py --dataset <dir> [--segment]`
 - **Calibration des seuils (vérifieur seul)**: `./venv/bin/python poc/eval_identification.py`
