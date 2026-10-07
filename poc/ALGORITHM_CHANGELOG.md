@@ -260,13 +260,53 @@ catalogue plus gros → re-calibrer à mesure que le set labellisé grandit.
 
 ---
 
+## v5 - Plancher sur le NOMBRE d'inliers (is_same)
+
+**Date**: 2026-10-07
+
+**Contexte**: même après v4 (medium 0.06), la prod (`/api/photos/[id]/similar`)
+affichait encore des individus *différents* de la même sortie comme « Même
+individu » (medium). Analyse sur données réelles (harnais
+`poc/eval_identification_e2e.py` + les individus catalogués de prod) :
+
+- Le score (ratio `inliers / min(#keypoints)`) est **biaisé par le nombre de
+  keypoints** : un crop pauvre gonfle le ratio. Ex. prod : 8 inliers → 0.066 vs
+  9 inliers → 0.055.
+- Le **nombre absolu d'inliers** sépare bien mieux. Distributions :
+
+| jeu | same (inliers) | diff (inliers) | AUC count | AUC ratio |
+|-----|----------------|----------------|-----------|-----------|
+| corpus terrain (5 ind.) | min 6, méd 27, max 83 | **max 10** | **0.977** | 0.959 |
+| docs/images (14 ind.) | méd 57, max 118 | **max 9** | 0.911 | 0.914 |
+| prod (vrais re-captures) | Malone/Titine **24-26** | ≤ 10 | — | — |
+
+→ les individus différents ne dépassent **jamais ~10 inliers** ; un plancher à
+**12** donne **0 faux positif** sur les deux jeux ET la prod.
+
+**Changement** (`verifier.py`): ajout de `DEFAULT_MIN_INLIERS = 12`. `is_same`
+exige désormais `score ≥ medium` (0.06) **ET** `inliers ≥ 12` ; une paire qui
+passe la bande de ratio mais a trop peu d'inliers est rétrogradée en
+`(is_same=False, "low")`. Le plancher domine (aucune paire d'individus
+différents n'atteint 12 inliers), donc la valeur exacte de medium (0.06 de v4)
+n'a plus d'effet sur la précision. Contrat d'API inchangé. Côté Pan,
+`bestExistingMatch` filtre déjà sur `is_same`, donc les faux « Même individu »
+disparaissent et la section affiche « Aucune autre photo du même individu trouvée ».
+
+**Limites**: les re-captures à ~2 ans tombent sous le plancher (Louche 752 j →
+8 inliers) ou sont perdues en amont au retrieval cosinus (Diplodocus, Tom →
+hors top-100). Le plancher ne les régresse pas (elles échouent déjà), mais le
+**rappel longue-distance** reste un chantier séparé (meilleur embedding / pool
+plus large).
+
+---
+
 ## Statut actuel
 
-- **Algorithme en production**: v4 (SIFT + RANSAC, seuil is_same 0.06)
-- **Performance jeu propre (14 individus)**: top-1 ~97 %, AUC 0.914, 100 % précision @ 0.06
+- **Algorithme en production**: v5 (SIFT + RANSAC, medium 0.06 + plancher d'inliers ≥ 12)
+- **Performance jeu propre (14 individus)**: top-1 ~97 %, AUC 0.914, 0 faux positif @ inliers ≥ 12
 - **Performance terrain (corpus, 5 individus)**: identification e2e 77 %, 0 faux positif
 - **Benchmark des alternatives**: `./venv/bin/python poc/benchmark_methods.py`
-- **Éval bout-en-bout + balayage de seuil**: `./venv/bin/python poc/eval_identification_e2e.py --dataset <dir> [--segment]`
+- **Éval bout-en-bout + balayage seuil/plancher**: `./venv/bin/python poc/eval_identification_e2e.py --dataset <dir> [--segment]`
 - **Calibration des seuils (vérifieur seul)**: `./venv/bin/python poc/eval_identification.py`
 
 ---

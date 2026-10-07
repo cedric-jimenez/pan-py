@@ -33,8 +33,19 @@ logger = logging.getLogger(__name__)
 # pairs while recovering true matches that 0.08 rejected (field-photo end-to-end
 # identification 69%->77%). 0.05 starts admitting false positives.
 DEFAULT_HIGH_THRESHOLD = 0.15  # very confident same
-DEFAULT_MEDIUM_THRESHOLD = 0.06  # is_same=True boundary (0 FP on 964 diff pairs)
+DEFAULT_MEDIUM_THRESHOLD = 0.06  # ratio band for is_same (also gated by inlier count)
 DEFAULT_LOW_THRESHOLD = 0.05  # below this: confidently different
+
+# Absolute floor on the RANSAC inlier COUNT required to call two images the same
+# individual, applied on top of the ratio bands. The ratio alone is confounded by
+# keypoint count (a sparse crop inflates it), and on real data different individuals
+# reach an inlier *ratio* up to ~0.07-0.10 by coincidence — but their inlier *count*
+# never exceeds ~10, while genuine re-captures that are retrievable at all score 24+
+# (see poc/eval_identification_e2e.py inlier-floor sweep + prod /similar). A floor of
+# 12 gives 0 false positives across both labelled sets and the prod catalogue. Very
+# distant re-captures (~2 years) fall below this but already fail today (dropped at
+# cosine retrieval, or scoring in the <10 noise), so the floor doesn't regress them.
+DEFAULT_MIN_INLIERS = 12
 
 # SIFT / matching parameters.
 _IMAGE_SIZE = 224  # resize-pad target (matches the embedder geometry)
@@ -70,6 +81,7 @@ class SalamanderVerifier:
         high_threshold: float = DEFAULT_HIGH_THRESHOLD,
         medium_threshold: float = DEFAULT_MEDIUM_THRESHOLD,
         low_threshold: float = DEFAULT_LOW_THRESHOLD,
+        min_inliers: int = DEFAULT_MIN_INLIERS,
     ) -> None:
         """Initialize the verifier.
 
@@ -81,23 +93,37 @@ class SalamanderVerifier:
             medium_threshold: Inlier ratio above this → is_same=True, confidence=medium.
             low_threshold: Inlier ratio above this (but below medium) → is_same=False,
                 confidence=low. Below this → is_same=False, confidence=high.
+            min_inliers: Minimum RANSAC inlier COUNT to allow is_same=True, applied
+                on top of the ratio bands (see DEFAULT_MIN_INLIERS). A pair that
+                clears a ratio band but has fewer inliers is downgraded to
+                (is_same=False, confidence="low").
         """
         del embedder  # intentionally unused
         self.high_threshold = high_threshold
         self.medium_threshold = medium_threshold
         self.low_threshold = low_threshold
+        self.min_inliers = min_inliers
         self._sift = cv2.SIFT_create()  # type: ignore[attr-defined]
         self._matcher = cv2.BFMatcher(cv2.NORM_L2)
 
-    def _classify(self, score: float) -> tuple[bool, str]:
-        """Classify an inlier-ratio score into a (is_same, confidence) decision."""
+    def _classify(self, score: float, inliers: int) -> tuple[bool, str]:
+        """Classify a (inlier-ratio, inlier-count) pair into (is_same, confidence).
+
+        The ratio sets the band; an absolute inlier-count floor then vetoes any
+        "same" call backed by too few geometrically consistent points — these are
+        the coincidental cross-individual matches that the ratio alone lets through.
+        """
         if score >= self.high_threshold:
-            return True, "high"
-        if score >= self.medium_threshold:
-            return True, "medium"
-        if score >= self.low_threshold:
-            return False, "low"
-        return False, "high"
+            is_same, confidence = True, "high"
+        elif score >= self.medium_threshold:
+            is_same, confidence = True, "medium"
+        elif score >= self.low_threshold:
+            is_same, confidence = False, "low"
+        else:
+            is_same, confidence = False, "high"
+        if is_same and inliers < self.min_inliers:
+            return False, "low"  # too few inliers to trust a same-individual call
+        return is_same, confidence
 
     def _extract(self, image: Image.Image) -> _SiftFeatures:
         """Detect SIFT keypoints on the resize-padded greyscale image.
@@ -158,7 +184,7 @@ class SalamanderVerifier:
     def verify(self, image1: Image.Image, image2: Image.Image) -> dict:
         """Verify whether two images show the same individual."""
         score, matches, inliers = self._match_score(self._extract(image1), self._extract(image2))
-        is_same, confidence = self._classify(score)
+        is_same, confidence = self._classify(score, inliers)
         return {
             "is_same": is_same,
             "score": float(score),
@@ -189,7 +215,7 @@ class SalamanderVerifier:
         results: list[_VerifyResult] = []
         for idx, candidate in enumerate(candidate_images):
             score, matches, inliers = self._match_score(query_features, self._extract(candidate))
-            is_same, confidence = self._classify(score)
+            is_same, confidence = self._classify(score, inliers)
             results.append(
                 {
                     "candidate_index": idx,

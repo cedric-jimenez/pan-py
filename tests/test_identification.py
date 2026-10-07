@@ -10,6 +10,7 @@ from app.identification.verifier import (
     DEFAULT_HIGH_THRESHOLD,
     DEFAULT_LOW_THRESHOLD,
     DEFAULT_MEDIUM_THRESHOLD,
+    DEFAULT_MIN_INLIERS,
     SalamanderVerifier,
 )
 
@@ -55,18 +56,30 @@ def _verifier() -> SalamanderVerifier:
 
 
 # --- _classify ---------------------------------------------------------------
+_ENOUGH = 50  # inlier count well above DEFAULT_MIN_INLIERS, so the ratio band decides
+
+
 def test_classify_bands():
     v = _verifier()
-    assert v._classify(DEFAULT_HIGH_THRESHOLD + 0.01) == (True, "high")
-    assert v._classify(DEFAULT_MEDIUM_THRESHOLD + 0.001) == (True, "medium")
-    assert v._classify(DEFAULT_LOW_THRESHOLD + 0.001) == (False, "low")
-    assert v._classify(DEFAULT_LOW_THRESHOLD - 0.001) == (False, "high")
+    assert v._classify(DEFAULT_HIGH_THRESHOLD + 0.01, _ENOUGH) == (True, "high")
+    assert v._classify(DEFAULT_MEDIUM_THRESHOLD + 0.001, _ENOUGH) == (True, "medium")
+    assert v._classify(DEFAULT_LOW_THRESHOLD + 0.001, _ENOUGH) == (False, "low")
+    assert v._classify(DEFAULT_LOW_THRESHOLD - 0.001, _ENOUGH) == (False, "high")
 
 
 def test_is_same_boundary_is_medium_threshold():
     v = _verifier()
-    assert v._classify(DEFAULT_MEDIUM_THRESHOLD - 0.001)[0] is False
-    assert v._classify(DEFAULT_MEDIUM_THRESHOLD)[0] is True
+    assert v._classify(DEFAULT_MEDIUM_THRESHOLD - 0.001, _ENOUGH)[0] is False
+    assert v._classify(DEFAULT_MEDIUM_THRESHOLD, _ENOUGH)[0] is True
+
+
+def test_inlier_floor_vetoes_same():
+    """A pair clearing the ratio band but with too few inliers is not 'same'."""
+    v = _verifier()
+    # Score well into the 'high/same' band, but inlier count below the floor.
+    assert v._classify(DEFAULT_HIGH_THRESHOLD + 0.1, DEFAULT_MIN_INLIERS - 1) == (False, "low")
+    # Same score, enough inliers -> stays same.
+    assert v._classify(DEFAULT_HIGH_THRESHOLD + 0.1, DEFAULT_MIN_INLIERS) == (True, "high")
 
 
 # --- SIFT matching -----------------------------------------------------------
