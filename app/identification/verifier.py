@@ -27,8 +27,13 @@ logger = logging.getLogger(__name__)
 # Thresholds on the RANSAC inlier ratio: inliers / min(#keypoints of the pair).
 # Calibrated on docs/images/ (14 individuals): same-individual median ~0.31,
 # different-individual max ~0.06. See poc/benchmark_methods.py.
+# The is_same boundary sits just above that different-individual ceiling (0.06):
+# an end-to-end sweep (poc/eval_identification_e2e.py) over docs/images AND the
+# raw-field-photo corpus showed 0.06 keeps 0 false positives across 964 diff
+# pairs while recovering true matches that 0.08 rejected (field-photo end-to-end
+# identification 69%->77%). 0.05 starts admitting false positives.
 DEFAULT_HIGH_THRESHOLD = 0.15  # very confident same
-DEFAULT_MEDIUM_THRESHOLD = 0.08  # is_same=True boundary (100% precision, ~80% recall)
+DEFAULT_MEDIUM_THRESHOLD = 0.06  # is_same=True boundary (0 FP on 964 diff pairs)
 DEFAULT_LOW_THRESHOLD = 0.05  # below this: confidently different
 
 # SIFT / matching parameters.
