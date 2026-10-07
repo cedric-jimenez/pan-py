@@ -224,11 +224,49 @@ long terme inchangée : metric learning / fine-tuning.
 
 ---
 
+## v4 - Seuil is_same 0.08 → 0.06
+
+**Date**: 2026-10-07
+
+**Contexte**: éval bout-en-bout de la chaîne complète (segment → embed → verify)
+via `poc/eval_identification_e2e.py`, sur **deux** jeux : `docs/images` (14
+individus, croppés) et le corpus terrain brut `Echantillons/.../par-individu`
+(5 individus, multi-session). Objectif : chiffrer pourquoi l'identification
+paraît approximative sur photos terrain.
+
+**Constat clé**: la frontière `is_same` *opérante* est **medium**, pas high —
+`/verify` renvoie `is_same=True` dès medium, et côté Pan `bestExistingMatch`
+(`lib/identify-suggestion.ts`) ne filtre que sur `is_same`. Le label high (0.15)
+est purement cosmétique. Le vérifieur lui-même est excellent (AUC 0.91–0.96,
+**0 faux positif** sur 964 paires d'individus différents, qui plafonnent à 0.06).
+
+**Balayage du seuil is_same** (recall / faux positifs / identification e2e) :
+
+| seuil | docs/images | corpus terrain |
+|-------|-------------|----------------|
+| 0.05 | 82 % / **3 FP** / 86 % | 64 % / **1 FP** / 85 % |
+| **0.06** | 82 % / 0 FP / 86 % | 64 % / 0 FP / **77 %** |
+| 0.08 (ancien) | 80 % / 0 FP / 86 % | 55 % / 0 FP / 69 % |
+| 0.15 | 67 % / 0 FP / 82 % | 27 % / 0 FP / 46 % |
+
+**Changement** (`verifier.py`): `DEFAULT_MEDIUM_THRESHOLD` 0.08 → **0.06**.
+0.06 reste juste au-dessus du plafond des paires-différentes (0.06) → précision
+toujours 100 % sur 964 paires, tout en remontant le rappel terrain (identification
+e2e 69 % → 77 %). 0.05 est écarté (fait apparaître des faux positifs).
+
+**Limites**: petits jeux (5 et 14 individus) → le rappel a de larges barres
+d'erreur ; la marge au-dessus du max diff (0.06) est fine et montera avec un
+catalogue plus gros → re-calibrer à mesure que le set labellisé grandit.
+
+---
+
 ## Statut actuel
 
-- **Algorithme en production**: v3 (SIFT + RANSAC sur le motif de taches)
-- **Performance sur jeu propre (14 individus)**: top-1 97.7 %, AUC 0.914, précision 100 % @ 0.08
+- **Algorithme en production**: v4 (SIFT + RANSAC, seuil is_same 0.06)
+- **Performance jeu propre (14 individus)**: top-1 ~97 %, AUC 0.914, 100 % précision @ 0.06
+- **Performance terrain (corpus, 5 individus)**: identification e2e 77 %, 0 faux positif
 - **Benchmark des alternatives**: `./venv/bin/python poc/benchmark_methods.py`
-- **Calibration des seuils**: `./venv/bin/python poc/eval_identification.py`
+- **Éval bout-en-bout + balayage de seuil**: `./venv/bin/python poc/eval_identification_e2e.py --dataset <dir> [--segment]`
+- **Calibration des seuils (vérifieur seul)**: `./venv/bin/python poc/eval_identification.py`
 
 ---
