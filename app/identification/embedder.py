@@ -6,6 +6,7 @@ rather than just species-level features.
 """
 
 import logging
+import os
 import warnings
 from typing import Any
 
@@ -89,11 +90,20 @@ class SalamanderEmbedder:
             category=UserWarning,
         )
 
-        self.model = torch.hub.load(
-            "facebookresearch/dinov2",
-            self.model_name,
-            verbose=False,
-        )
+        # The Docker image pre-downloads the hub repo + weights into TORCH_HOME at
+        # build time. Load that copy with source="local": the github source makes
+        # network calls on every start (branch lookup, and a full re-download
+        # when the cache is missing), which on Railway's on-demand restarts
+        # delayed start-up enough for requests to fail with 502.
+        local_repo = os.path.join(torch.hub.get_dir(), "facebookresearch_dinov2_main")
+        if os.path.isdir(local_repo):
+            self.model = torch.hub.load(local_repo, self.model_name, source="local")
+        else:
+            self.model = torch.hub.load(
+                "facebookresearch/dinov2",
+                self.model_name,
+                verbose=False,
+            )
         self.model.eval()
 
         self.transform = transforms.Compose(
