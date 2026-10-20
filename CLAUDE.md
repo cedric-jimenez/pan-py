@@ -10,6 +10,7 @@ A FastAPI microservice for salamander detection and individual identification, d
 2. **Segment** (`POST /segment-salamander`) — YOLO-seg instance segmentation → mask-based crop with background replacement
 3. **Embed** (`POST /embed`) — DINOv2 GeM-pooled patch tokens → 384-dim normalized vector for vector DB storage (coarse retrieval pre-filter)
 4. **Verify** (`POST /verify`) — SIFT keypoints + RANSAC geometric verification of the spot pattern → `is_same`/`score`
+   - `POST /verify-urls` — same scoring, candidates given as image URLs with a per-URL SIFT feature cache; this is what Pan's `/similar` calls (whole catalogue, not a top-K)
 
 ## Commands
 
@@ -85,6 +86,8 @@ app/
 
 This replaced a DINOv2 patch mutual-nearest-neighbor score (v1/v2) that captured generic appearance rather than individual spot geometry and produced many false positives. The verifier no longer needs DINOv2 (so `/verify` is fast and independent of the embedder warmup); DINOv2 is still used for `/embed` retrieval.
 
+**Whole-catalogue verification (`/verify-urls`).** Pan's `/similar` no longer verifies only a cosine top-K (the DINOv2 embedding groups photos by session, so true matches from other dates fell out of the top 100). It sends the query and *all* candidate segmented-image URLs as JSON; `FeatureStore` (`app/identification/feature_store.py`) downloads each URL once (16 threads), extracts SIFT and keeps the features in an in-memory LRU (descriptors stored as uint8, lossless). Pan's image URLs are immutable UUIDs, so entries never go stale. Measured: ~30 ms per never-seen image, ~1.3 ms per cached comparison (1,200 candidates ≈ 1.5 s). The cache is lost on restart, so the first search after a deploy is slower. Only https URLs on `VERIFY_URL_ALLOWED_HOSTS` are fetched (no open proxy).
+
 ### Environment variables
 
 | Variable | Default | Description |
@@ -92,6 +95,8 @@ This replaced a DINOv2 patch mutual-nearest-neighbor score (v1/v2) that captured
 | `YOLO_MODEL_PATH` | `models/crop.pt` | YOLO detection model |
 | `YOLO_SEGMENT_MODEL_PATH` | `models/segment.pt` | YOLO-seg model |
 | `ALLOWED_ORIGINS` | `*` | Comma-separated CORS origins |
+| `VERIFY_URL_ALLOWED_HOSTS` | `.r2.dev` | Comma-separated host suffixes `/verify-urls` may download from (https only) |
+| `FEATURE_CACHE_MAX_ENTRIES` | `10000` | Max images whose SIFT features stay cached in memory (~25 KB each) |
 
 Copy `.env.example` to `.env` for local development.
 

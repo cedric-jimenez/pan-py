@@ -4,14 +4,21 @@ Uses small synthetic "spot pattern" images so the tests run without the labelled
 dataset or any neural model.
 """
 
+import io
+
+import cv2
+import numpy as np
 from PIL import Image, ImageDraw
 
+from app.identification.feature_store import FeatureStore, _to_compact
 from app.identification.verifier import (
     DEFAULT_HIGH_THRESHOLD,
     DEFAULT_LOW_THRESHOLD,
     DEFAULT_MEDIUM_THRESHOLD,
     DEFAULT_MIN_INLIERS,
+    EMPTY_FEATURES,
     SalamanderVerifier,
+    extract_sift_features,
 )
 
 # A fixed set of "spots" — distinct blobs give SIFT plenty of keypoints.
@@ -148,3 +155,75 @@ def test_score_is_json_serializable_float():
     v = _verifier()
     result = v.verify(_spot_image(_SPOTS), _spot_image(_SPOTS))
     assert type(result["score"]) is float
+
+
+# --- pre-extracted features / FeatureStore -----------------------------------
+def _png_bytes(img: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_verify_features_matches_image_path():
+    """Scoring cached (compact) features gives the same result as scoring images."""
+    v = _verifier()
+    query = _spot_image(_SPOTS)
+    candidates = [_spot_image(_OTHER_SPOTS), _spot_image(_SPOTS, offset=(5, 5))]
+    from_images = v.verify_against_many(query, candidates)
+
+    sift = cv2.SIFT_create()
+    feats = [_to_compact(extract_sift_features(img, sift)) for img in [query, *candidates]]
+    assert v.verify_features_against_many(feats[0], feats[1:]) == from_images
+
+    # A candidate that couldn't be loaded scores 0 and is never "same".
+    empty = v.verify_features_against_many(feats[0], [EMPTY_FEATURES])[0]
+    assert (empty["score"], empty["is_same"], empty["inliers"]) == (0.0, False, 0)
+
+
+def test_compact_descriptors_are_lossless():
+    """OpenCV SIFT descriptors are integer-valued, so uint8 storage loses nothing."""
+    _, des = extract_sift_features(_spot_image(_SPOTS), cv2.SIFT_create())
+    _, compact = _to_compact((np.zeros((0, 2)), des))
+    assert compact.dtype == np.uint8
+    assert np.array_equal(compact.astype(np.float32), des)
+
+
+def test_feature_store_url_allowlist():
+    store = FeatureStore(allowed_hosts=(".r2.dev",))
+    assert store.is_allowed("https://pub-abc.r2.dev/x.jpg")
+    assert not store.is_allowed("http://pub-abc.r2.dev/x.jpg")  # https only
+    assert not store.is_allowed("https://evil.example.com/x.jpg")
+    assert not store.is_allowed("https://r2.dev.evil.com/x.jpg")
+    assert not store.is_allowed("https://169.254.169.254/latest/meta-data")
+
+
+def test_feature_store_caches_and_skips_failures(monkeypatch):
+    """Each URL is downloaded once; failed downloads return None and aren't cached."""
+    png = _png_bytes(_spot_image(_SPOTS))
+    calls: list[str] = []
+
+    def fake_download(self, url):
+        calls.append(url)
+        if "missing" in url:
+            raise OSError("404")
+        return png
+
+    monkeypatch.setattr(FeatureStore, "_download", fake_download)
+    store = FeatureStore(max_entries=10)
+    urls = ["https://a.r2.dev/1.png", "https://a.r2.dev/missing.png"]
+
+    first = store.get_many(urls)
+    assert first[0] is not None and first[1] is None
+    second = store.get_many(urls)
+    assert second[0] is not None
+    # 1.png fetched once (then cached), missing.png retried
+    assert calls.count(urls[0]) == 1 and calls.count(urls[1]) == 2
+    assert len(store) == 1
+
+
+def test_feature_store_evicts_oldest(monkeypatch):
+    png = _png_bytes(_spot_image(_SPOTS))
+    monkeypatch.setattr(FeatureStore, "_download", lambda self, url: png)
+    store = FeatureStore(max_entries=2)
+    store.get_many([f"https://a.r2.dev/{i}.png" for i in range(3)])
+    assert len(store) == 2
