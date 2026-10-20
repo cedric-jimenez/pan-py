@@ -76,6 +76,13 @@ class VerificationResult(BaseModel):
     )
     matches: int = Field(0, description="Number of raw SIFT matches (deprecated, always 0)")
     inliers: int = Field(0, description="Number of RANSAC inliers (deprecated, always 0)")
+    strip_inliers: int = Field(
+        0,
+        description=(
+            "RANSAC inliers between the straightened (unbent) salamanders. Ranking signal "
+            "for 'candidates to verify'; does not affect is_same. 0 when not computed."
+        ),
+    )
 
 
 class VerificationResponse(BaseModel):

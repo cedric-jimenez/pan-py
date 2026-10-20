@@ -13,6 +13,9 @@ numpy==1.26.3
 # S3-compatible bucket (Railway) for the persisted SIFT feature cache
 boto3==1.35.36
 
+# Midline skeleton for straightening salamanders (app/identification/straighten.py)
+scikit-image==0.22.0
+
 # Data Validation
 pydantic==2.5.3
 

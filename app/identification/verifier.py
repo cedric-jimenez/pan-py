@@ -16,7 +16,7 @@ See poc/benchmark_methods.py for the comparison.
 
 import logging
 import threading
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 import cv2
 import numpy as np
@@ -96,6 +96,9 @@ class _VerifyResult(TypedDict):
     cosine_similarity: float
     matches: int
     inliers: int
+    # RANSAC inliers between the straightened strips (see straighten.py); only set
+    # when strip features are given. A ranking signal, never used for is_same.
+    strip_inliers: NotRequired[int]
 
 
 class SalamanderVerifier:
@@ -239,29 +242,40 @@ class SalamanderVerifier:
         self,
         query_features: SiftFeatures,
         candidate_features: list[SiftFeatures],
+        query_strip: SiftFeatures | None = None,
+        candidate_strips: list[SiftFeatures] | None = None,
     ) -> list[_VerifyResult]:
         """Verify pre-extracted query features against many candidates.
 
         Same scoring as verify_against_many, without re-extracting SIFT — used
         with a feature cache so a photo is only analysed once. Results are sorted
         by score desc; candidate_index refers to the position in the input list.
+
+        When straightened-strip features are given (query_strip +
+        candidate_strips, aligned with candidate_features), each result also gets
+        ``strip_inliers``: a ranking signal for "candidates to verify" that does
+        not change is_same.
         """
+        with_strips = query_strip is not None and candidate_strips is not None
         results: list[_VerifyResult] = []
         with self._lock:
             for idx, features in enumerate(candidate_features):
                 score, matches, inliers = self._match_score(query_features, features)
                 is_same, confidence = self._classify(score, inliers)
-                results.append(
-                    {
-                        "candidate_index": idx,
-                        "is_same": is_same,
-                        "score": float(score),
-                        "confidence": confidence,
-                        "cosine_similarity": 0.0,
-                        "matches": matches,
-                        "inliers": inliers,
-                    }
-                )
+                result: _VerifyResult = {
+                    "candidate_index": idx,
+                    "is_same": is_same,
+                    "score": float(score),
+                    "confidence": confidence,
+                    "cosine_similarity": 0.0,
+                    "matches": matches,
+                    "inliers": inliers,
+                }
+                if with_strips:
+                    assert query_strip is not None and candidate_strips is not None
+                    _, _, strip_inliers = self._match_score(query_strip, candidate_strips[idx])
+                    result["strip_inliers"] = strip_inliers
+                results.append(result)
 
         results.sort(key=lambda x: x["score"], reverse=True)
         return results
