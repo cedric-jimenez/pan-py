@@ -21,6 +21,18 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Bake the DINOv2 hub repo + weights (~85 MB) into the image. Without this every
+# container start (Railway restarts the service on demand) re-downloads them,
+# which made start-up slow enough for requests to fail with 502. The embedder
+# loads this copy with source="local" (no network at start-up).
+ENV TORCH_HOME=/app/.cache/torch
+RUN python -c "import torch; torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')" \
+    && test -d /app/.cache/torch/hub/facebookresearch_dinov2_main \
+    && test -f /app/.cache/torch/hub/checkpoints/dinov2_vits14_pretrain.pth
+
+# Ultralytics wants a writable settings dir (the app user's home config isn't).
+ENV YOLO_CONFIG_DIR=/tmp/Ultralytics
+
 # Copy application code
 COPY app/ ./app/
 COPY models/ ./models/

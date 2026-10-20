@@ -132,6 +132,8 @@ class BucketPersistence:
             config=Config(
                 s3={"addressing_style": env.get("BUCKET_URL_STYLE", "virtual")},
                 retries={"max_attempts": 3},
+                # Shards are loaded with 16 threads; the default pool keeps 10.
+                max_pool_connections=16,
                 connect_timeout=5,
                 read_timeout=30,
             ),
