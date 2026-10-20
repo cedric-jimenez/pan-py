@@ -54,3 +54,23 @@ async def test_crop_salamander_invalid_confidence():
     """Test crop endpoint with invalid confidence value."""
     response = client.post("/crop-salamander?confidence=2.0")
     assert response.status_code == 422  # Validation error (confidence > 1.0)
+
+
+def test_verify_urls_rejects_disallowed_host():
+    """Only allow-listed image hosts may be fetched (no open proxy)."""
+    with TestClient(app) as c:  # runs lifespan so the verifier/feature store exist
+        response = c.post(
+            "/verify-urls",
+            json={
+                "query_url": "https://evil.example.com/q.jpg",
+                "candidate_urls": ["https://pub-x.r2.dev/c.jpg"],
+            },
+        )
+    assert response.status_code == 400
+
+
+def test_verify_urls_requires_candidates():
+    response = client.post(
+        "/verify-urls", json={"query_url": "https://pub-x.r2.dev/q.jpg", "candidate_urls": []}
+    )
+    assert response.status_code == 422

@@ -88,6 +88,21 @@ class VerificationResponse(BaseModel):
     )
 
 
+MAX_VERIFY_URL_CANDIDATES = 5000
+
+
+class VerifyUrlsRequest(BaseModel):
+    """Request model for URL-based verification against many candidates."""
+
+    query_url: str = Field(..., description="URL of the query (segmented) image")
+    candidate_urls: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_VERIFY_URL_CANDIDATES,
+        description="URLs of the candidate (segmented) images",
+    )
+
+
 class CompareEmbeddingsRequest(BaseModel):
     """Request model for embedding comparison."""
 

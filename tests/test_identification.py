@@ -4,14 +4,28 @@ Uses small synthetic "spot pattern" images so the tests run without the labelled
 dataset or any neural model.
 """
 
+import io
+
+import cv2
+import numpy as np
 from PIL import Image, ImageDraw
 
+from app.identification.feature_store import (
+    BucketPersistence,
+    FeatureStore,
+    _to_compact,
+    decode_shard,
+    encode_shard,
+    shard_of,
+)
 from app.identification.verifier import (
     DEFAULT_HIGH_THRESHOLD,
     DEFAULT_LOW_THRESHOLD,
     DEFAULT_MEDIUM_THRESHOLD,
     DEFAULT_MIN_INLIERS,
+    EMPTY_FEATURES,
     SalamanderVerifier,
+    extract_sift_features,
 )
 
 # A fixed set of "spots" — distinct blobs give SIFT plenty of keypoints.
@@ -148,3 +162,174 @@ def test_score_is_json_serializable_float():
     v = _verifier()
     result = v.verify(_spot_image(_SPOTS), _spot_image(_SPOTS))
     assert type(result["score"]) is float
+
+
+# --- pre-extracted features / FeatureStore -----------------------------------
+def _png_bytes(img: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_verify_features_matches_image_path():
+    """Scoring cached (compact) features gives the same result as scoring images."""
+    v = _verifier()
+    query = _spot_image(_SPOTS)
+    candidates = [_spot_image(_OTHER_SPOTS), _spot_image(_SPOTS, offset=(5, 5))]
+    from_images = v.verify_against_many(query, candidates)
+
+    sift = cv2.SIFT_create()
+    feats = [_to_compact(extract_sift_features(img, sift)) for img in [query, *candidates]]
+    assert v.verify_features_against_many(feats[0], feats[1:]) == from_images
+
+    # A candidate that couldn't be loaded scores 0 and is never "same".
+    empty = v.verify_features_against_many(feats[0], [EMPTY_FEATURES])[0]
+    assert (empty["score"], empty["is_same"], empty["inliers"]) == (0.0, False, 0)
+
+
+def test_compact_descriptors_are_lossless():
+    """OpenCV SIFT descriptors are integer-valued, so uint8 storage loses nothing."""
+    _, des = extract_sift_features(_spot_image(_SPOTS), cv2.SIFT_create())
+    _, compact = _to_compact((np.zeros((0, 2)), des))
+    assert compact.dtype == np.uint8
+    assert np.array_equal(compact.astype(np.float32), des)
+
+
+def test_feature_store_url_allowlist():
+    store = FeatureStore(allowed_hosts=(".r2.dev",))
+    assert store.is_allowed("https://pub-abc.r2.dev/x.jpg")
+    assert not store.is_allowed("http://pub-abc.r2.dev/x.jpg")  # https only
+    assert not store.is_allowed("https://evil.example.com/x.jpg")
+    assert not store.is_allowed("https://r2.dev.evil.com/x.jpg")
+    assert not store.is_allowed("https://169.254.169.254/latest/meta-data")
+
+
+def test_feature_store_caches_and_skips_failures(monkeypatch):
+    """Each URL is downloaded once; failed downloads return None and aren't cached."""
+    png = _png_bytes(_spot_image(_SPOTS))
+    calls: list[str] = []
+
+    def fake_download(self, url):
+        calls.append(url)
+        if "missing" in url:
+            raise OSError("404")
+        return png
+
+    monkeypatch.setattr(FeatureStore, "_download", fake_download)
+    store = FeatureStore()
+    urls = ["https://a.r2.dev/1.png", "https://a.r2.dev/missing.png"]
+
+    first = store.get_many(urls)
+    assert first[0] is not None and first[1] is None
+    second = store.get_many(urls)
+    assert second[0] is not None
+    # 1.png fetched once (then cached), missing.png retried
+    assert calls.count(urls[0]) == 1 and calls.count(urls[1]) == 2
+    assert len(store) == 1
+
+
+# --- bucket persistence ------------------------------------------------------
+class _NoSuchKey(Exception):
+    response = {"Error": {"Code": "NoSuchKey"}}
+
+
+class _FakeS3:
+    """Minimal in-memory stand-in for a boto3 S3 client."""
+
+    def __init__(self):
+        self.objects: dict[str, bytes] = {}
+        self.puts: list[str] = []
+
+    def get_object(self, Bucket, Key):  # noqa: N803 (boto3 casing)
+        if Key not in self.objects:
+            raise _NoSuchKey()
+        return {"Body": io.BytesIO(self.objects[Key])}
+
+    def put_object(self, Bucket, Key, Body):  # noqa: N803
+        self.objects[Key] = Body
+        self.puts.append(Key)
+
+
+def test_shard_encoding_roundtrip():
+    sift = cv2.SIFT_create()
+    entries = {
+        "https://a.r2.dev/1.png": _to_compact(extract_sift_features(_spot_image(_SPOTS), sift)),
+        "https://a.r2.dev/blank.png": EMPTY_FEATURES,
+        "https://a.r2.dev/2.png": _to_compact(
+            extract_sift_features(_spot_image(_OTHER_SPOTS), sift)
+        ),
+    }
+    decoded = decode_shard(encode_shard(entries))
+    assert list(decoded) == list(entries)
+    for url, (pts, des) in entries.items():
+        assert np.array_equal(decoded[url][0], pts)
+        if des is None:
+            assert decoded[url][1] is None
+        else:
+            assert np.array_equal(decoded[url][1], des)
+    assert decode_shard(encode_shard({})) == {}
+
+
+def test_features_survive_a_restart_via_bucket(monkeypatch):
+    """A new process reloads features from the bucket instead of re-downloading."""
+    png = _png_bytes(_spot_image(_SPOTS))
+    downloads: list[str] = []
+
+    def fake_download(self, url):
+        downloads.append(url)
+        return png
+
+    monkeypatch.setattr(FeatureStore, "_download", fake_download)
+    s3 = _FakeS3()
+    urls = [f"https://a.r2.dev/{i}.png" for i in range(5)]
+
+    first = FeatureStore(persistence=BucketPersistence(s3, "bucket"))
+    before = first.get_many(urls)
+    first.flush()
+    assert len(downloads) == 5
+    # only the shards that hold the new URLs were written
+    assert len(s3.puts) == len({shard_of(u) for u in urls})
+
+    restarted = FeatureStore(persistence=BucketPersistence(s3, "bucket"))
+    assert restarted.wait_until_loaded(5)
+    after = restarted.get_many(urls)
+    assert len(downloads) == 5  # nothing re-downloaded
+    for (pts_a, des_a), (pts_b, des_b) in zip(before, after, strict=True):
+        assert np.array_equal(pts_a, pts_b) and np.array_equal(des_a, des_b)
+
+
+def test_new_photo_rewrites_its_shard_without_losing_others(monkeypatch):
+    png = _png_bytes(_spot_image(_SPOTS))
+    monkeypatch.setattr(FeatureStore, "_download", lambda self, url: png)
+    s3 = _FakeS3()
+    store = FeatureStore(persistence=BucketPersistence(s3, "bucket"))
+    urls = [f"https://a.r2.dev/{i}.png" for i in range(40)]
+    store.get_many(urls)
+    store.get_many(["https://a.r2.dev/new.png"])
+    store.flush()
+
+    restarted = FeatureStore(persistence=BucketPersistence(s3, "bucket"))
+    restarted.wait_until_loaded(5)
+    assert len(restarted) == 41
+
+
+def test_broken_bucket_degrades_to_memory_only(monkeypatch):
+    class _Broken:
+        def get_object(self, **_):
+            raise ConnectionError("bucket down")
+
+        def put_object(self, **_):
+            raise ConnectionError("bucket down")
+
+    png = _png_bytes(_spot_image(_SPOTS))
+    monkeypatch.setattr(FeatureStore, "_download", lambda self, url: png)
+    store = FeatureStore(persistence=BucketPersistence(_Broken(), "bucket"))
+    assert store.wait_until_loaded(5)
+    assert store.get_many(["https://a.r2.dev/1.png"])[0] is not None
+    store.flush()  # failed write is logged, not raised
+
+
+def test_bucket_persistence_from_env_disabled_without_bucket(monkeypatch):
+    for name in ("BUCKET", "AWS_S3_BUCKET_NAME"):
+        monkeypatch.delenv(name, raising=False)
+    assert BucketPersistence.from_env() is None

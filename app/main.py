@@ -16,7 +16,9 @@ from pythonjsonlogger import jsonlogger
 
 from app import __version__
 from app.detection import SalamanderDetector, SalamanderSegmenter
-from app.identification import SalamanderEmbedder, SalamanderVerifier
+from app.identification import FeatureStore, SalamanderEmbedder, SalamanderVerifier
+from app.identification.feature_store import BucketPersistence
+from app.identification.verifier import EMPTY_FEATURES
 from app.models import (
     BoundingBox,
     CompareEmbeddingsRequest,
@@ -27,6 +29,7 @@ from app.models import (
     SegmentationResponse,
     VerificationResponse,
     VerificationResult,
+    VerifyUrlsRequest,
 )
 from app.utils import pil_to_base64
 
@@ -57,12 +60,22 @@ detector: SalamanderDetector | None = None
 segmenter: SalamanderSegmenter | None = None
 embedder: SalamanderEmbedder | None = None
 verifier: SalamanderVerifier | None = None
+feature_store: FeatureStore | None = None
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Initialize and cleanup resources."""
-    global detector, segmenter, embedder, verifier
+    global detector, segmenter, embedder, verifier, feature_store
+    # Start first: the SIFT feature cache reloads from the bucket in a background
+    # thread while the models below load.
+    try:
+        persistence = BucketPersistence.from_env()
+    except Exception as e:  # misconfigured bucket must not keep the API down
+        logger.warning(f"Feature bucket disabled: {e}")
+        persistence = None
+    logger.info(f"Feature cache persistence: {'bucket' if persistence else 'memory only'}")
+    feature_store = FeatureStore(persistence=persistence)
     # Startup: Load the YOLO models
     logger.info("Loading YOLO detection model...")
     detector = SalamanderDetector()
@@ -81,8 +94,9 @@ async def lifespan(_app: FastAPI):
     logger.info("Initializing SIFT verifier...")
     verifier = SalamanderVerifier()
     yield
-    # Shutdown: cleanup if needed
+    # Shutdown: let pending feature-shard writes reach the bucket.
     logger.info("Shutting down...")
+    feature_store.flush()
 
 
 # Initialize FastAPI app
@@ -655,6 +669,72 @@ async def verify_images(
         raise
     except Exception as e:
         logger.error(f"Error during verification: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail="Internal server error during verification."
+        ) from e
+
+
+@app.post("/verify-urls", response_model=VerificationResponse)
+def verify_urls(body: VerifyUrlsRequest):
+    """
+    Verify a query image against many candidates given by URL (SIFT + RANSAC).
+
+    Same scoring as /verify, but images are fetched by URL and their SIFT
+    features are cached in memory (see FeatureStore). Each photo is analysed
+    once, so a query can be compared against a user's *whole* catalogue instead
+    of a short cosine-ranked list — the cosine pre-filter drops true matches.
+
+    Candidates whose image can't be loaded score 0. Defined as a sync endpoint
+    so FastAPI runs the CPU/network work on its thread pool.
+
+    Returns:
+        VerificationResponse with results sorted by score; candidate_index is the
+        position in candidate_urls.
+    """
+    if verifier is None or feature_store is None:
+        raise HTTPException(status_code=503, detail="Verifier not initialized.")
+
+    urls = [body.query_url, *body.candidate_urls]
+    disallowed = [u for u in urls if not feature_store.is_allowed(u)]
+    if disallowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"URL host not allowed: {disallowed[0]} (see VERIFY_URL_ALLOWED_HOSTS)",
+        )
+
+    try:
+        start_time = time.time()
+        features = feature_store.get_many(urls)
+        fetch_time = time.time() - start_time
+
+        query_features = features[0]
+        if query_features is None:
+            raise HTTPException(status_code=422, detail="Could not load the query image.")
+        candidate_features = [f if f is not None else EMPTY_FEATURES for f in features[1:]]
+        failed = sum(f is None for f in features[1:])
+
+        match_start = time.time()
+        results = verifier.verify_features_against_many(query_features, candidate_features)
+        match_time = time.time() - match_start
+
+        logger.info(
+            f"Verify-urls complete: candidates={len(candidate_features)}, failed={failed}, "
+            f"fetch={fetch_time:.3f}s, match={match_time:.3f}s"
+        )
+
+        return VerificationResponse(
+            success=True,
+            message=(
+                f"Verified against {len(candidate_features)} candidates"
+                + (f" ({failed} could not be loaded)" if failed else "")
+            ),
+            results=[VerificationResult(**r) for r in results],
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during URL verification: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500, detail="Internal server error during verification."
         ) from e

@@ -15,7 +15,8 @@ See poc/benchmark_methods.py for the comparison.
 """
 
 import logging
-from typing import TypedDict
+import threading
+from typing import Any, TypedDict
 
 import cv2
 import numpy as np
@@ -54,7 +55,37 @@ _RANSAC_REPROJ_THRESHOLD = 5.0  # pixels, for cv2.findHomography
 _MIN_MATCHES = 4  # cv2.findHomography needs at least 4 correspondences
 
 # A SIFT feature set: (keypoint coordinates (N,2), descriptors (N,128) or None).
-_SiftFeatures = tuple[np.ndarray, "np.ndarray | None"]
+SiftFeatures = tuple[np.ndarray, "np.ndarray | None"]
+
+# A feature set with no keypoints: never matches anything (score 0).
+EMPTY_FEATURES: SiftFeatures = (np.zeros((0, 2), dtype=np.float32), None)
+
+
+def extract_sift_features(image: Image.Image, sift: Any) -> SiftFeatures:
+    """Detect SIFT keypoints on the resize-padded greyscale image.
+
+    Background (uniform white/grey/black) produces no keypoints, so SIFT
+    naturally concentrates on the salamander's spot edges. Takes the SIFT
+    detector as an argument so callers on other threads can use their own
+    instance (cv2 detectors are not safe to share across threads).
+    """
+    rgb = image.convert("RGB")
+    w, h = rgb.size
+    scale = _IMAGE_SIZE / max(w, h)
+    new_w, new_h = max(int(w * scale), 1), max(int(h * scale), 1)
+    canvas = Image.new("RGB", (_IMAGE_SIZE, _IMAGE_SIZE), (0, 0, 0))
+    canvas.paste(
+        rgb.resize((new_w, new_h)), ((_IMAGE_SIZE - new_w) // 2, (_IMAGE_SIZE - new_h) // 2)
+    )
+
+    gray = cv2.cvtColor(np.asarray(canvas), cv2.COLOR_RGB2GRAY)
+    keypoints, descriptors = sift.detectAndCompute(gray, None)
+    pts = (
+        np.array([kp.pt for kp in keypoints], dtype=np.float32)
+        if keypoints
+        else np.zeros((0, 2), dtype=np.float32)
+    )
+    return pts, descriptors
 
 
 class _VerifyResult(TypedDict):
@@ -105,6 +136,9 @@ class SalamanderVerifier:
         self.min_inliers = min_inliers
         self._sift = cv2.SIFT_create()  # type: ignore[attr-defined]
         self._matcher = cv2.BFMatcher(cv2.NORM_L2)
+        # The cv2 detector/matcher are shared state: serialise their use so the
+        # endpoints can run on FastAPI's thread pool.
+        self._lock = threading.Lock()
 
     def _classify(self, score: float, inliers: int) -> tuple[bool, str]:
         """Classify a (inlier-ratio, inlier-count) pair into (is_same, confidence).
@@ -125,31 +159,11 @@ class SalamanderVerifier:
             return False, "low"  # too few inliers to trust a same-individual call
         return is_same, confidence
 
-    def _extract(self, image: Image.Image) -> _SiftFeatures:
-        """Detect SIFT keypoints on the resize-padded greyscale image.
+    def _extract(self, image: Image.Image) -> SiftFeatures:
+        """Detect SIFT keypoints on an image (see extract_sift_features)."""
+        return extract_sift_features(image, self._sift)
 
-        Background (uniform white/grey/black) produces no keypoints, so SIFT
-        naturally concentrates on the salamander's spot edges.
-        """
-        rgb = image.convert("RGB")
-        w, h = rgb.size
-        scale = _IMAGE_SIZE / max(w, h)
-        new_w, new_h = max(int(w * scale), 1), max(int(h * scale), 1)
-        canvas = Image.new("RGB", (_IMAGE_SIZE, _IMAGE_SIZE), (0, 0, 0))
-        canvas.paste(
-            rgb.resize((new_w, new_h)), ((_IMAGE_SIZE - new_w) // 2, (_IMAGE_SIZE - new_h) // 2)
-        )
-
-        gray = cv2.cvtColor(np.asarray(canvas), cv2.COLOR_RGB2GRAY)
-        keypoints, descriptors = self._sift.detectAndCompute(gray, None)
-        pts = (
-            np.array([kp.pt for kp in keypoints], dtype=np.float32)
-            if keypoints
-            else np.zeros((0, 2), dtype=np.float32)
-        )
-        return pts, descriptors
-
-    def _match_score(self, a: _SiftFeatures, b: _SiftFeatures) -> tuple[float, int, int]:
+    def _match_score(self, a: SiftFeatures, b: SiftFeatures) -> tuple[float, int, int]:
         """Score a pair via Lowe-ratio matching + RANSAC geometric verification.
 
         Returns (inlier_ratio, n_good_matches, n_inliers).
@@ -158,6 +172,9 @@ class SalamanderVerifier:
         pts_b, des_b = b
         if des_a is None or des_b is None or len(des_a) < _MIN_MATCHES or len(des_b) < _MIN_MATCHES:
             return 0.0, 0, 0
+        # Cached descriptors may be stored compactly as uint8 (see FeatureStore).
+        des_a = des_a.astype(np.float32, copy=False)
+        des_b = des_b.astype(np.float32, copy=False)
 
         # Lowe ratio test on the two nearest neighbours.
         knn = self._matcher.knnMatch(des_a, des_b, k=2)
@@ -183,7 +200,10 @@ class SalamanderVerifier:
 
     def verify(self, image1: Image.Image, image2: Image.Image) -> dict:
         """Verify whether two images show the same individual."""
-        score, matches, inliers = self._match_score(self._extract(image1), self._extract(image2))
+        with self._lock:
+            score, matches, inliers = self._match_score(
+                self._extract(image1), self._extract(image2)
+            )
         is_same, confidence = self._classify(score, inliers)
         return {
             "is_same": is_same,
@@ -210,23 +230,38 @@ class SalamanderVerifier:
         del cosine_threshold  # intentionally unused
         if not candidate_images:
             return []
+        with self._lock:
+            query_features = self._extract(query_image)
+            candidate_features = [self._extract(c) for c in candidate_images]
+        return self.verify_features_against_many(query_features, candidate_features)
 
-        query_features = self._extract(query_image)
+    def verify_features_against_many(
+        self,
+        query_features: SiftFeatures,
+        candidate_features: list[SiftFeatures],
+    ) -> list[_VerifyResult]:
+        """Verify pre-extracted query features against many candidates.
+
+        Same scoring as verify_against_many, without re-extracting SIFT — used
+        with a feature cache so a photo is only analysed once. Results are sorted
+        by score desc; candidate_index refers to the position in the input list.
+        """
         results: list[_VerifyResult] = []
-        for idx, candidate in enumerate(candidate_images):
-            score, matches, inliers = self._match_score(query_features, self._extract(candidate))
-            is_same, confidence = self._classify(score, inliers)
-            results.append(
-                {
-                    "candidate_index": idx,
-                    "is_same": is_same,
-                    "score": float(score),
-                    "confidence": confidence,
-                    "cosine_similarity": 0.0,
-                    "matches": matches,
-                    "inliers": inliers,
-                }
-            )
+        with self._lock:
+            for idx, features in enumerate(candidate_features):
+                score, matches, inliers = self._match_score(query_features, features)
+                is_same, confidence = self._classify(score, inliers)
+                results.append(
+                    {
+                        "candidate_index": idx,
+                        "is_same": is_same,
+                        "score": float(score),
+                        "confidence": confidence,
+                        "cosine_similarity": 0.0,
+                        "matches": matches,
+                        "inliers": inliers,
+                    }
+                )
 
         results.sort(key=lambda x: x["score"], reverse=True)
         return results
