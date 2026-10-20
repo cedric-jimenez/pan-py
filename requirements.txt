@@ -10,6 +10,9 @@ opencv-python-headless==4.9.0.80
 pillow==10.2.0
 numpy==1.26.3
 
+# S3-compatible bucket (Railway) for the persisted SIFT feature cache
+boto3==1.35.36
+
 # Data Validation
 pydantic==2.5.3
 

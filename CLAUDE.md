@@ -86,7 +86,9 @@ app/
 
 This replaced a DINOv2 patch mutual-nearest-neighbor score (v1/v2) that captured generic appearance rather than individual spot geometry and produced many false positives. The verifier no longer needs DINOv2 (so `/verify` is fast and independent of the embedder warmup); DINOv2 is still used for `/embed` retrieval.
 
-**Whole-catalogue verification (`/verify-urls`).** Pan's `/similar` no longer verifies only a cosine top-K (the DINOv2 embedding groups photos by session, so true matches from other dates fell out of the top 100). It sends the query and *all* candidate segmented-image URLs as JSON; `FeatureStore` (`app/identification/feature_store.py`) downloads each URL once (16 threads), extracts SIFT and keeps the features in an in-memory LRU (descriptors stored as uint8, lossless). Pan's image URLs are immutable UUIDs, so entries never go stale. Measured: ~30 ms per never-seen image, ~1.3 ms per cached comparison (1,200 candidates ≈ 1.5 s). The cache is lost on restart, so the first search after a deploy is slower. Only https URLs on `VERIFY_URL_ALLOWED_HOSTS` are fetched (no open proxy).
+**Whole-catalogue verification (`/verify-urls`).** Pan's `/similar` no longer verifies only a cosine top-K (the DINOv2 embedding groups photos by session, so true matches from other dates fell out of the top 100). It sends the query and *all* candidate segmented-image URLs as JSON; `FeatureStore` (`app/identification/feature_store.py`) downloads each URL once (16 threads), extracts SIFT and keeps the features in memory (descriptors stored as uint8, lossless; no eviction, ~25 KB/photo). Pan's image URLs are immutable UUIDs, so entries never go stale. Measured: ~30 ms per never-seen image, ~1.3 ms per cached comparison (1,200 candidates ≈ 1.5 s). Only https URLs on `VERIFY_URL_ALLOWED_HOSTS` are fetched (no open proxy).
+
+**Persistence (Railway bucket).** The service sleeps/restarts on demand, which empties memory. When `BUCKET` (+ `ENDPOINT`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `REGION` — Railway bucket variable references) is set, `BucketPersistence` stores the features in 64 shard files `sift-features/v1-224px/shard-NN.npz` (URL → shard by sha256). At start-up all shards are reloaded in a background thread while the models load (searches wait for it, max 30 s); after a search only shards that gained photos are rewritten (single background writer). A bucket error never breaks the API: it degrades to memory-only. **Bump the `v1` prefix in `feature_store.py` whenever SIFT extraction changes** (params, resize geometry) so stale features aren't reused.
 
 ### Environment variables
 
@@ -96,7 +98,8 @@ This replaced a DINOv2 patch mutual-nearest-neighbor score (v1/v2) that captured
 | `YOLO_SEGMENT_MODEL_PATH` | `models/segment.pt` | YOLO-seg model |
 | `ALLOWED_ORIGINS` | `*` | Comma-separated CORS origins |
 | `VERIFY_URL_ALLOWED_HOSTS` | `.r2.dev` | Comma-separated host suffixes `/verify-urls` may download from (https only) |
-| `FEATURE_CACHE_MAX_ENTRIES` | `10000` | Max images whose SIFT features stay cached in memory (~25 KB each) |
+| `BUCKET`, `ENDPOINT`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `REGION` | unset | Railway bucket for the persisted SIFT feature cache (unset → memory-only). AWS SDK names (`AWS_S3_BUCKET_NAME`, `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, …) also work |
+| `BUCKET_URL_STYLE` | `virtual` | `virtual` or `path` (older Railway buckets; see the bucket's Credentials tab) |
 
 Copy `.env.example` to `.env` for local development.
 

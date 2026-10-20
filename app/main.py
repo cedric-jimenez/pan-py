@@ -17,6 +17,7 @@ from pythonjsonlogger import jsonlogger
 from app import __version__
 from app.detection import SalamanderDetector, SalamanderSegmenter
 from app.identification import FeatureStore, SalamanderEmbedder, SalamanderVerifier
+from app.identification.feature_store import BucketPersistence
 from app.identification.verifier import EMPTY_FEATURES
 from app.models import (
     BoundingBox,
@@ -66,6 +67,15 @@ feature_store: FeatureStore | None = None
 async def lifespan(_app: FastAPI):
     """Initialize and cleanup resources."""
     global detector, segmenter, embedder, verifier, feature_store
+    # Start first: the SIFT feature cache reloads from the bucket in a background
+    # thread while the models below load.
+    try:
+        persistence = BucketPersistence.from_env()
+    except Exception as e:  # misconfigured bucket must not keep the API down
+        logger.warning(f"Feature bucket disabled: {e}")
+        persistence = None
+    logger.info(f"Feature cache persistence: {'bucket' if persistence else 'memory only'}")
+    feature_store = FeatureStore(persistence=persistence)
     # Startup: Load the YOLO models
     logger.info("Loading YOLO detection model...")
     detector = SalamanderDetector()
@@ -83,10 +93,10 @@ async def lifespan(_app: FastAPI):
     logger.info(f"DINOv2 warmup complete in {time.time() - _warmup_start:.1f}s")
     logger.info("Initializing SIFT verifier...")
     verifier = SalamanderVerifier()
-    feature_store = FeatureStore()
     yield
-    # Shutdown: cleanup if needed
+    # Shutdown: let pending feature-shard writes reach the bucket.
     logger.info("Shutting down...")
+    feature_store.flush()
 
 
 # Initialize FastAPI app
