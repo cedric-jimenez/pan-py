@@ -21,16 +21,32 @@ import os
 import threading
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
 import cv2
 import numpy as np
 from PIL import Image
 
-from app.identification.verifier import _IMAGE_SIZE, SiftFeatures, extract_sift_features
+from app.identification.straighten import PX_PER_UNIT, strip_features
+from app.identification.verifier import (
+    _IMAGE_SIZE,
+    EMPTY_FEATURES,
+    SiftFeatures,
+    extract_sift_features,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class PhotoFeatures(NamedTuple):
+    """Everything cached for one photo."""
+
+    base: SiftFeatures  # prod SIFT on the resize-padded image (drives is_same)
+    strip: SiftFeatures  # SIFT on the straightened strip (ranks candidates to verify)
+
+
+EMPTY_PHOTO = PhotoFeatures(EMPTY_FEATURES, EMPTY_FEATURES)
 
 # Only fetch from these hosts (suffix match) to avoid turning the service into an
 # open proxy. Pan stores images on Cloudflare R2 public buckets (*.r2.dev).
@@ -48,7 +64,7 @@ _USER_AGENT = "pan-py/feature-store"
 # Persisted shards. Bump the version whenever extraction changes (SIFT params,
 # resize geometry…) so stale features are never reused.
 N_SHARDS = 64
-_SHARD_PREFIX = f"sift-features/v1-{_IMAGE_SIZE}px/"
+_SHARD_PREFIX = f"sift-features/v2-{_IMAGE_SIZE}px-strip{PX_PER_UNIT}/"
 # How long a search waits for the start-up load from the bucket.
 _LOAD_WAIT_S = 30
 
@@ -66,37 +82,55 @@ def shard_of(url: str) -> int:
     return int.from_bytes(hashlib.sha256(url.encode()).digest()[:4], "big") % N_SHARDS
 
 
-def encode_shard(entries: dict[str, SiftFeatures]) -> bytes:
-    """Pack {url: (pts, des)} into one compressed .npz (no pickle)."""
-    urls = list(entries)
-    counts = np.array([len(entries[u][0]) for u in urls], dtype=np.int32)
-    pts = [entries[u][0].astype(np.float32).reshape(-1, 2) for u in urls]
+def _pack(features: list[SiftFeatures]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    counts = np.array([len(f[0]) for f in features], dtype=np.int32)
+    pts = [f[0].astype(np.float32).reshape(-1, 2) for f in features]
     empty = np.zeros((0, 128), dtype=np.uint8)
-    des = [d.astype(np.uint8) if (d := entries[u][1]) is not None else empty for u in urls]
+    des = [d.astype(np.uint8) if (d := f[1]) is not None else empty for f in features]
+    return (
+        counts,
+        np.concatenate(pts) if pts else np.zeros((0, 2), dtype=np.float32),
+        np.concatenate(des) if des else empty,
+    )
+
+
+def _unpack(counts: np.ndarray, pts: np.ndarray, des: np.ndarray) -> list[SiftFeatures]:
+    out: list[SiftFeatures] = []
+    start = 0
+    for n in counts.tolist():
+        end = start + n
+        out.append((pts[start:end], des[start:end] if n else None))
+        start = end
+    return out
+
+
+def encode_shard(entries: dict[str, PhotoFeatures]) -> bytes:
+    """Pack {url: PhotoFeatures} into one compressed .npz (no pickle)."""
+    urls = list(entries)
+    counts, pts, des = _pack([entries[u].base for u in urls])
+    s_counts, s_pts, s_des = _pack([entries[u].strip for u in urls])
     buf = io.BytesIO()
     np.savez_compressed(
         buf,
         urls=np.frombuffer("\n".join(urls).encode(), dtype=np.uint8),
         counts=counts,
-        pts=np.concatenate(pts) if pts else np.zeros((0, 2), dtype=np.float32),
-        des=np.concatenate(des) if des else np.zeros((0, 128), dtype=np.uint8),
+        pts=pts,
+        des=des,
+        strip_counts=s_counts,
+        strip_pts=s_pts,
+        strip_des=s_des,
     )
     return buf.getvalue()
 
 
-def decode_shard(data: bytes) -> dict[str, SiftFeatures]:
+def decode_shard(data: bytes) -> dict[str, PhotoFeatures]:
     """Inverse of encode_shard."""
     with np.load(io.BytesIO(data), allow_pickle=False) as npz:
         raw_urls = npz["urls"].tobytes().decode()
         urls = raw_urls.split("\n") if raw_urls else []
-        counts, pts, des = npz["counts"], npz["pts"], npz["des"]
-    entries: dict[str, SiftFeatures] = {}
-    start = 0
-    for url, n in zip(urls, counts.tolist(), strict=True):
-        end = start + n
-        entries[url] = (pts[start:end], des[start:end] if n else None)
-        start = end
-    return entries
+        base = _unpack(npz["counts"], npz["pts"], npz["des"])
+        strip = _unpack(npz["strip_counts"], npz["strip_pts"], npz["strip_des"])
+    return {url: PhotoFeatures(b, s) for url, b, s in zip(urls, base, strip, strict=True)}
 
 
 class BucketPersistence:
@@ -143,7 +177,7 @@ class BucketPersistence:
     def _key(self, shard: int) -> str:
         return f"{self.prefix}shard-{shard:02d}.npz"
 
-    def load_shard(self, shard: int) -> dict[str, SiftFeatures]:
+    def load_shard(self, shard: int) -> dict[str, PhotoFeatures]:
         try:
             obj = self.client.get_object(Bucket=self.bucket, Key=self._key(shard))
         except Exception as e:
@@ -154,15 +188,16 @@ class BucketPersistence:
             raise
         return decode_shard(obj["Body"].read())
 
-    def save_shard(self, shard: int, entries: dict[str, SiftFeatures]) -> None:
+    def save_shard(self, shard: int, entries: dict[str, PhotoFeatures]) -> None:
         self.client.put_object(Bucket=self.bucket, Key=self._key(shard), Body=encode_shard(entries))
 
 
 class FeatureStore:
     """Thread-safe cache of SIFT features keyed by image URL.
 
-    Holds every analysed photo in memory (~25 KB each: ~250 MB for 10k photos),
-    without eviction so the persisted shards always stay complete.
+    Holds every analysed photo in memory (~40 KB each with the straightened
+    strip: ~400 MB for 10k photos), without eviction so the persisted shards
+    always stay complete.
     """
 
     def __init__(
@@ -172,7 +207,7 @@ class FeatureStore:
     ) -> None:
         self.allowed_hosts = allowed_hosts
         self.persistence = persistence
-        self._cache: dict[str, SiftFeatures] = {}
+        self._cache: dict[str, PhotoFeatures] = {}
         self._lock = threading.Lock()
         self._local = threading.local()  # one SIFT detector per worker thread
         # Shard writes run one at a time in the background, off the request path.
@@ -235,11 +270,16 @@ class FeatureStore:
             raise ValueError("image too large")
         return data
 
-    def _load(self, url: str) -> SiftFeatures | None:
+    def _load(self, url: str) -> PhotoFeatures | None:
         """Download + analyse one image. None if it can't be fetched/decoded."""
         try:
             image = Image.open(io.BytesIO(self._download(url)))
-            return _to_compact(extract_sift_features(image, self._sift()))
+            image.load()
+            sift = self._sift()
+            base = _to_compact(extract_sift_features(image, sift))
+            # strip_features never raises: a straightening failure only empties
+            # the strip, the base features (is_same) are kept.
+            return PhotoFeatures(base, _to_compact(strip_features(image, sift)))
         except Exception as e:  # network error, 403/404, corrupt image…
             logger.warning(f"feature_store: could not load {url}: {e}")
             return None
@@ -247,7 +287,7 @@ class FeatureStore:
     def _persist(self, shards: set[int]) -> None:
         """Rewrite the given shards from the current cache (background)."""
         assert self.persistence is not None
-        snapshots: dict[int, dict[str, SiftFeatures]] = {s: {} for s in shards}
+        snapshots: dict[int, dict[str, PhotoFeatures]] = {s: {} for s in shards}
         with self._lock:
             for url, features in self._cache.items():
                 shard = shard_of(url)
@@ -259,7 +299,7 @@ class FeatureStore:
             except Exception as e:  # keep serving; the shard is rewritten next time
                 logger.warning(f"feature_store: could not save shard {shard}: {e}")
 
-    def get_many(self, urls: list[str]) -> list[SiftFeatures | None]:
+    def get_many(self, urls: list[str]) -> list[PhotoFeatures | None]:
         """Return features for each URL (None where loading failed), in order."""
         if not self.wait_until_loaded(_LOAD_WAIT_S):
             logger.warning("feature_store: bucket load still running, continuing without it")

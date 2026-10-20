@@ -17,8 +17,7 @@ from pythonjsonlogger import jsonlogger
 from app import __version__
 from app.detection import SalamanderDetector, SalamanderSegmenter
 from app.identification import FeatureStore, SalamanderEmbedder, SalamanderVerifier
-from app.identification.feature_store import BucketPersistence
-from app.identification.verifier import EMPTY_FEATURES
+from app.identification.feature_store import EMPTY_PHOTO, BucketPersistence
 from app.models import (
     BoundingBox,
     CompareEmbeddingsRequest,
@@ -655,6 +654,7 @@ async def verify_images(
                 cosine_similarity=r["cosine_similarity"],
                 matches=r["matches"],
                 inliers=r["inliers"],
+                strip_inliers=r.get("strip_inliers", 0),
             )
             for r in results
         ]
@@ -707,14 +707,20 @@ def verify_urls(body: VerifyUrlsRequest):
         features = feature_store.get_many(urls)
         fetch_time = time.time() - start_time
 
-        query_features = features[0]
-        if query_features is None:
+        query = features[0]
+        if query is None:
             raise HTTPException(status_code=422, detail="Could not load the query image.")
-        candidate_features = [f if f is not None else EMPTY_FEATURES for f in features[1:]]
+        candidates = [f if f is not None else EMPTY_PHOTO for f in features[1:]]
+        candidate_features = [c.base for c in candidates]
         failed = sum(f is None for f in features[1:])
 
         match_start = time.time()
-        results = verifier.verify_features_against_many(query_features, candidate_features)
+        results = verifier.verify_features_against_many(
+            query.base,
+            candidate_features,
+            query_strip=query.strip,
+            candidate_strips=[c.strip for c in candidates],
+        )
         match_time = time.time() - match_start
 
         logger.info(

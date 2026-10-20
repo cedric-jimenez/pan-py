@@ -11,13 +11,16 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from app.identification.feature_store import (
+    EMPTY_PHOTO,
     BucketPersistence,
     FeatureStore,
+    PhotoFeatures,
     _to_compact,
     decode_shard,
     encode_shard,
     shard_of,
 )
+from app.identification.straighten import straighten, strip_features
 from app.identification.verifier import (
     DEFAULT_HIGH_THRESHOLD,
     DEFAULT_LOW_THRESHOLD,
@@ -250,23 +253,26 @@ class _FakeS3:
         self.puts.append(Key)
 
 
+def _same_features(a, b) -> bool:
+    if a[1] is None or b[1] is None:
+        return a[1] is None and b[1] is None and len(a[0]) == len(b[0])
+    return np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])
+
+
 def test_shard_encoding_roundtrip():
     sift = cv2.SIFT_create()
+    one = _to_compact(extract_sift_features(_spot_image(_SPOTS), sift))
+    two = _to_compact(extract_sift_features(_spot_image(_OTHER_SPOTS), sift))
     entries = {
-        "https://a.r2.dev/1.png": _to_compact(extract_sift_features(_spot_image(_SPOTS), sift)),
-        "https://a.r2.dev/blank.png": EMPTY_FEATURES,
-        "https://a.r2.dev/2.png": _to_compact(
-            extract_sift_features(_spot_image(_OTHER_SPOTS), sift)
-        ),
+        "https://a.r2.dev/1.png": PhotoFeatures(one, two),
+        "https://a.r2.dev/blank.png": EMPTY_PHOTO,
+        "https://a.r2.dev/2.png": PhotoFeatures(two, EMPTY_FEATURES),
     }
     decoded = decode_shard(encode_shard(entries))
     assert list(decoded) == list(entries)
-    for url, (pts, des) in entries.items():
-        assert np.array_equal(decoded[url][0], pts)
-        if des is None:
-            assert decoded[url][1] is None
-        else:
-            assert np.array_equal(decoded[url][1], des)
+    for url, photo in entries.items():
+        assert _same_features(decoded[url].base, photo.base)
+        assert _same_features(decoded[url].strip, photo.strip)
     assert decode_shard(encode_shard({})) == {}
 
 
@@ -294,8 +300,8 @@ def test_features_survive_a_restart_via_bucket(monkeypatch):
     assert restarted.wait_until_loaded(5)
     after = restarted.get_many(urls)
     assert len(downloads) == 5  # nothing re-downloaded
-    for (pts_a, des_a), (pts_b, des_b) in zip(before, after, strict=True):
-        assert np.array_equal(pts_a, pts_b) and np.array_equal(des_a, des_b)
+    for a, b in zip(before, after, strict=True):
+        assert _same_features(a.base, b.base) and _same_features(a.strip, b.strip)
 
 
 def test_new_photo_rewrites_its_shard_without_losing_others(monkeypatch):
@@ -333,3 +339,97 @@ def test_bucket_persistence_from_env_disabled_without_bucket(monkeypatch):
     for name in ("BUCKET", "AWS_S3_BUCKET_NAME"):
         monkeypatch.delenv(name, raising=False)
     assert BucketPersistence.from_env() is None
+
+
+# --- straightening -----------------------------------------------------------
+def _salamander(spots, bend: float, size=(260, 420)) -> Image.Image:
+    """Synthetic salamander on grey: black body tapering to the tail, yellow spots
+    placed in body coordinates (arc position, side offset), so the same `spots`
+    drawn with a different `bend` is the same individual in another pose."""
+    w, h = size
+    img = Image.new("RGB", size, (150, 150, 150))
+    draw = ImageDraw.Draw(img)
+    t = np.linspace(0, 1, 200)
+    x = w / 2 + bend * w * 0.35 * np.sin(np.pi * t)
+    y = 20 + t * (h - 40)
+    pts = np.stack([x, y], axis=1)
+    tang = np.gradient(pts, axis=0)
+    tang /= np.linalg.norm(tang, axis=1, keepdims=True)
+    normal = np.stack([-tang[:, 1], tang[:, 0]], axis=1)
+    half = 26 * (1 - 0.8 * t) + 4  # head (top) wider than the tail
+    for i in range(len(t)):
+        cx, cy = pts[i]
+        draw.ellipse([cx - half[i], cy - half[i], cx + half[i], cy + half[i]], fill=(15, 15, 15))
+    for ts, side, r in spots:
+        i = int(ts * (len(t) - 1))
+        cx, cy = pts[i] + side * half[i] * normal[i]
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(230, 200, 20))
+    return img
+
+
+_SAL_SPOTS = [
+    (0.08, 0.0, 9), (0.18, -0.5, 6), (0.22, 0.5, 7), (0.3, -0.2, 5), (0.36, 0.45, 6),
+    (0.42, -0.5, 7), (0.5, 0.1, 5), (0.55, 0.5, 6), (0.6, -0.4, 5), (0.27, 0.15, 4),
+]  # fmt: skip
+_SAL_OTHER = [
+    (0.1, 0.4, 7), (0.15, -0.3, 8), (0.25, 0.0, 6), (0.33, 0.5, 5), (0.38, -0.5, 6),
+    (0.46, 0.3, 7), (0.52, -0.2, 5), (0.58, 0.0, 6), (0.62, 0.45, 5), (0.2, 0.55, 4),
+]  # fmt: skip
+
+
+def test_straighten_gives_head_up_vertical_strip():
+    strip, mask = straighten(_salamander(_SAL_SPOTS, bend=0.8))
+    assert strip.shape[0] > strip.shape[1]  # tall, narrow strip
+    rows = mask.sum(axis=1)
+    body_rows = np.nonzero(rows)[0]
+    first, last = body_rows[0], body_rows[-1]
+    third = (last - first) // 3
+    # the wider (head) end is at the top
+    assert rows[first : first + third].mean() > rows[last - third : last].mean()
+
+
+def test_strip_ranks_same_individual_across_poses_above_another():
+    v = _verifier()
+    sift = cv2.SIFT_create()
+    query = strip_features(_salamander(_SAL_SPOTS, bend=0.0), sift)
+    same_bent = strip_features(_salamander(_SAL_SPOTS, bend=0.9), sift)
+    other_bent = strip_features(_salamander(_SAL_OTHER, bend=0.9), sift)
+    results = v.verify_features_against_many(
+        EMPTY_FEATURES,
+        [EMPTY_FEATURES, EMPTY_FEATURES],
+        query_strip=query,
+        candidate_strips=[same_bent, other_bent],
+    )
+    by_index = {r["candidate_index"]: r for r in results}
+    assert by_index[0]["strip_inliers"] > by_index[1]["strip_inliers"]
+    # strips never change the automatic decision (base features are empty here)
+    assert not any(r["is_same"] for r in results)
+
+
+def test_strip_features_on_blank_image_is_empty():
+    blank = Image.new("RGB", (200, 300), (150, 150, 150))
+    pts, des = strip_features(blank, cv2.SIFT_create())
+    assert len(pts) == 0 and des is None
+
+
+def test_straighten_failure_keeps_base_features(monkeypatch):
+    """A crash while straightening must not lose the photo (its is_same features)."""
+    import app.identification.straighten as straighten_module
+
+    def boom(image):
+        raise cv2.error("simulated")
+
+    monkeypatch.setattr(straighten_module, "straighten", boom)
+    png = _png_bytes(_spot_image(_SPOTS))
+    monkeypatch.setattr(FeatureStore, "_download", lambda self, url: png)
+    photo = FeatureStore().get_many(["https://a.r2.dev/1.png"])[0]
+    assert photo is not None
+    assert len(photo.base[0]) > 0
+    assert len(photo.strip[0]) == 0
+
+
+def test_strip_inliers_absent_without_strips():
+    v = _verifier()
+    feats = extract_sift_features(_spot_image(_SPOTS), cv2.SIFT_create())
+    result = v.verify_features_against_many(feats, [feats])[0]
+    assert "strip_inliers" not in result
